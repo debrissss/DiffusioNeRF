@@ -1,0 +1,49 @@
+# DiffusioNeRF 项目忽略规则
+
+# 数据集
+# README 和运行脚本约定 LLFF、NeRF-Synthetic、DTU 均存放在此目录。
+/data/
+
+# 当前项目已有的测试与实验结果
+# test/ 保存各方法在 LLFF、DTU 上的渲染图和指标；
+# test_LLFF/ 保存训练日志、权重、验证图、测试图和网格。
+/test/
+/test_LLFF/
+
+# main_nerf.py 的默认训练输出目录（--workspace workspace）
+/workspace/
+
+# 自定义 --workspace 下由 nerf/utils.py 生成的内容
+**/checkpoints/
+**/validation/
+**/results/
+**/results-*/
+**/meshes/
+**/run/
+**/log_ngp.txt
+
+# table.py 生成的实验指标表
+/tables/
+
+# PyTorch 模型权重
+*.pth
+*.pth.tar
+
+# 测试视频（Trainer.test(write_video=True)）
+*_rgb.mp4
+*_depth.mp4
+
+# Python / Jupyter 缓存
+__pycache__/
+*.py[cod]
+.ipynb_checkpoints/
+
+# 本项目 CUDA 扩展通过 setup.py 本地编译时产生
+**/build/
+*.egg-info/
+*.so
+
+# 本地编辑器和系统文件
+.vscode/
+.idea/
+.DS_Store
