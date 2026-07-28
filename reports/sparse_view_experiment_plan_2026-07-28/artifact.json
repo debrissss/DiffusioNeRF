@@ -1,0 +1,859 @@
+{
+  "surface": "report",
+  "manifest": {
+    "version": 1,
+    "surface": "report",
+    "title": "DiffusioNeRF 稀疏视点实验补全计划书（2024–2026 新方法对比）",
+    "description": "面向论文补充实验：核实可直接引用的 2024–2026 年 NeRF 与 3DGS 方法，并为本项目制定论文忠实配置与项目历史兼容配置两套执行方案。",
+    "generatedAt": "2026-07-28T00:00:00Z",
+    "cards": [
+      {
+        "id": "qualified_methods",
+        "description": "同时报告 LLFF 与 DTU、具有可核对原论文聚合数值的候选方法组。",
+        "dataset": "summary",
+        "sourceId": "literature_matrix",
+        "metrics": [
+          {
+            "label": "可直接引用方法组",
+            "field": "qualified_methods",
+            "format": "number"
+          }
+        ]
+      },
+      {
+        "id": "config_count",
+        "description": "主实验严格保留论文忠实配置 A 与项目历史兼容配置 B，不按场景挑选较优配置。",
+        "dataset": "summary",
+        "sourceId": "execution_plan",
+        "metrics": [
+          {
+            "label": "独立主配置",
+            "field": "config_count",
+            "format": "number"
+          }
+        ]
+      },
+      {
+        "id": "benchmark_scenes",
+        "description": "LLFF 8 个场景加 DTU 标准 15 个场景。",
+        "dataset": "summary",
+        "sourceId": "execution_plan",
+        "metrics": [
+          {
+            "label": "标准评测场景",
+            "field": "benchmark_scenes",
+            "format": "number"
+          }
+        ]
+      },
+      {
+        "id": "planned_runs",
+        "description": "主矩阵 345 次训练，加去重后的消融增量 81 次；不含失败重跑和仅评测任务。",
+        "dataset": "summary",
+        "sourceId": "execution_plan",
+        "metrics": [
+          {
+            "label": "计划唯一训练运行",
+            "field": "planned_runs",
+            "format": "number"
+          }
+        ]
+      }
+    ],
+    "charts": [
+      {
+        "id": "psnr_3view_comparison",
+        "title": "可直接引用方法的 3-view PSNR",
+        "subtitle": "均为作者论文报告值；柱形仅用于定位竞争强度，不消除初始化、外部先验和实现差异。",
+        "type": "bar",
+        "dataset": "psnr_3view",
+        "sourceId": "literature_matrix",
+        "encodings": {
+          "x": {
+            "field": "method",
+            "type": "nominal",
+            "label": "方法"
+          },
+          "y": {
+            "field": "psnr",
+            "type": "quantitative",
+            "label": "PSNR",
+            "format": "number",
+            "unit": "dB"
+          },
+          "color": {
+            "field": "dataset",
+            "type": "nominal",
+            "label": "数据集"
+          },
+          "tooltip": [
+            {
+              "field": "year",
+              "type": "quantitative",
+              "label": "年份"
+            },
+            {
+              "field": "family",
+              "type": "text",
+              "label": "表示类型"
+            },
+            {
+              "field": "ssim",
+              "type": "quantitative",
+              "label": "SSIM"
+            },
+            {
+              "field": "lpips",
+              "type": "quantitative",
+              "label": "LPIPS"
+            }
+          ]
+        },
+        "layout": "full",
+        "maxRows": 20
+      }
+    ],
+    "tables": [
+      {
+        "id": "literature_results",
+        "title": "2024–2026 可直接引用的作者报告结果",
+        "subtitle": "空白 AVGE 表示原表未报告；同一方法不同视图数均保留。",
+        "dataset": "literature_results",
+        "sourceId": "literature_matrix",
+        "defaultSort": {
+          "field": "year",
+          "direction": "desc"
+        },
+        "density": "dense",
+        "layout": "full",
+        "columns": [
+          {
+            "field": "year",
+            "label": "年份",
+            "format": "number"
+          },
+          {
+            "field": "method",
+            "label": "方法",
+            "type": "text"
+          },
+          {
+            "field": "family",
+            "label": "类型",
+            "type": "text"
+          },
+          {
+            "field": "venue",
+            "label": "出处",
+            "type": "text"
+          },
+          {
+            "field": "status",
+            "label": "状态",
+            "type": "text"
+          },
+          {
+            "field": "dataset",
+            "label": "数据集",
+            "type": "text"
+          },
+          {
+            "field": "views",
+            "label": "视图数",
+            "format": "number"
+          },
+          {
+            "field": "psnr",
+            "label": "PSNR",
+            "format": "number"
+          },
+          {
+            "field": "ssim",
+            "label": "SSIM",
+            "format": "number"
+          },
+          {
+            "field": "lpips",
+            "label": "LPIPS",
+            "format": "number"
+          },
+          {
+            "field": "avge_display",
+            "label": "AVGE",
+            "type": "text"
+          }
+        ]
+      },
+      {
+        "id": "config_comparison",
+        "title": "两套主配置的冻结定义",
+        "subtitle": "A 用于论文主结论；B 用于解释和延续项目已有结果。二者必须作为独立实验组报告。",
+        "dataset": "config_comparison",
+        "sourceId": "execution_plan",
+        "defaultSort": {
+          "field": "order",
+          "direction": "asc"
+        },
+        "density": "spacious",
+        "layout": "full",
+        "columns": [
+          {
+            "field": "order",
+            "label": "序号",
+            "format": "number"
+          },
+          {
+            "field": "dimension",
+            "label": "配置项",
+            "type": "text"
+          },
+          {
+            "field": "config_a",
+            "label": "A：论文叙述忠实配置",
+            "type": "text"
+          },
+          {
+            "field": "config_b",
+            "label": "B：项目历史兼容配置",
+            "type": "text"
+          },
+          {
+            "field": "reporting_rule",
+            "label": "报告规则",
+            "type": "text"
+          }
+        ]
+      },
+      {
+        "id": "llff_split_ids",
+        "title": "LLFF 拟冻结的确定性训练/测试 ID",
+        "subtitle": "先按 i mod 8 = 0 留出测试图，再在剩余有序轨迹上等间距取样；实际执行时写入 JSON，不在运行时重新计算。",
+        "dataset": "llff_splits",
+        "sourceId": "execution_plan",
+        "defaultSort": {
+          "field": "scene",
+          "direction": "asc"
+        },
+        "density": "dense",
+        "layout": "full",
+        "columns": [
+          {
+            "field": "scene",
+            "label": "场景",
+            "type": "text"
+          },
+          {
+            "field": "test_ids",
+            "label": "测试 ID",
+            "type": "text"
+          },
+          {
+            "field": "train_3",
+            "label": "3-view",
+            "type": "text"
+          },
+          {
+            "field": "train_6",
+            "label": "6-view",
+            "type": "text"
+          },
+          {
+            "field": "train_9",
+            "label": "9-view",
+            "type": "text"
+          }
+        ]
+      },
+      {
+        "id": "execution_matrix",
+        "title": "按优先级执行的训练矩阵",
+        "subtitle": "先完成协议修复和 3-view 主结果，再做消融与更多视图；增量运行数已扣除与主矩阵重合的 full-model seed-0。",
+        "dataset": "execution_matrix",
+        "sourceId": "execution_plan",
+        "defaultSort": {
+          "field": "priority",
+          "direction": "asc"
+        },
+        "density": "spacious",
+        "layout": "full",
+        "columns": [
+          {
+            "field": "priority",
+            "label": "优先级",
+            "format": "number"
+          },
+          {
+            "field": "work",
+            "label": "工作包",
+            "type": "text"
+          },
+          {
+            "field": "matrix",
+            "label": "运行矩阵",
+            "type": "text"
+          },
+          {
+            "field": "unique_runs",
+            "label": "唯一训练数",
+            "format": "number"
+          },
+          {
+            "field": "deliverable",
+            "label": "输出",
+            "type": "text"
+          },
+          {
+            "field": "gate",
+            "label": "进入下一阶段的门槛",
+            "type": "text"
+          }
+        ]
+      }
+    ],
+    "sources": [
+      {
+        "id": "literature_matrix",
+        "label": "人工核对的作者报告结果矩阵",
+        "path": "reports/sparse_view_experiment_plan_2026-07-28/comparison_matrix.csv",
+        "query": {
+          "engine": "duckdb",
+          "sql": "SELECT * FROM read_csv_auto('reports/sparse_view_experiment_plan_2026-07-28/comparison_matrix.csv') ORDER BY year, method, dataset, views",
+          "language": "manual-transcription",
+          "description": "从各方法原论文主表或附录表逐行抄录，并保留数据集、视图数、发表状态和协议说明。",
+          "executed_at": "2026-07-28T00:00:00Z",
+          "filters": [
+            "年份为 2024、2025 或 2026",
+            "方法原论文同时报告 LLFF 与 DTU",
+            "至少具有一组可直接引用的作者报告聚合数值",
+            "不把第三方博客或搜索摘要当作数值来源"
+          ],
+          "metric_definitions": [
+            "PSNR、SSIM、LPIPS 为作者论文报告的场景聚合指标。",
+            "AVGE 按相关论文定义为 sqrt(1-SSIM)、LPIPS 与 MSE=10^(-PSNR/10) 三项的几何平均；仅在作者表中给出时抄录。"
+          ]
+        }
+      },
+      {
+        "id": "execution_plan",
+        "label": "本项目实验审计与执行矩阵",
+        "path": "reports/sparse_view_experiment_plan_2026-07-28/artifact.json",
+        "query": {
+          "engine": "duckdb",
+          "sql": "SELECT 7 AS qualified_methods, 2 AS config_count, 23 AS benchmark_scenes, 426 AS planned_runs",
+          "language": "repository-audit",
+          "description": "根据本地论文、启动脚本、数据加载器、训练入口和 test 目录审计后制定。",
+          "executed_at": "2026-07-28T00:00:00Z",
+          "filters": [
+            "LLFF 8 场景",
+            "DTU 标准 15 场景",
+            "A 配置只跑 3/9-view",
+            "B 配置跑 3/6/9-view",
+            "最终主结果使用 3 个种子"
+          ],
+          "metric_definitions": [
+            "标准场景数 = 8 个 LLFF + 15 个 DTU = 23。",
+            "主矩阵训练数 = A(23×2×3) + B(23×3×3) = 345。",
+            "消融增量 = A 的三项非 full 变体(23×3) + B 的三项非 full 桥接变体(4×3) = 81。",
+            "总唯一训练数 = 345 + 81 = 426。"
+          ]
+        }
+      },
+      {
+        "id": "local_thesis",
+        "label": "本地论文提纯版",
+        "path": "稀疏视点下神经辐射场重建的优化方法_提纯版.pdf"
+      },
+      {
+        "id": "local_runner",
+        "label": "当前 LLFF 启动脚本",
+        "path": "run_DiffusioNeRF_LLFF.sh"
+      },
+      {
+        "id": "local_provider",
+        "label": "当前数据加载与划分实现",
+        "path": "nerf/provider.py"
+      },
+      {
+        "id": "local_main",
+        "label": "当前训练入口与优化器配置",
+        "path": "main_nerf.py"
+      },
+      {
+        "id": "local_results",
+        "label": "现有人工整理指标",
+        "path": "test/our/定量指标.txt"
+      },
+      {
+        "id": "dngaussian",
+        "label": "DNGaussian — CVPR 2024",
+        "href": "https://openaccess.thecvf.com/content/CVPR2024/papers/Li_DNGaussian_Optimizing_Sparse-View_3D_Gaussian_Radiance_Fields_with_Global-Local_Depth_CVPR_2024_paper.pdf"
+      },
+      {
+        "id": "corgs",
+        "label": "CoR-GS — ECCV 2024",
+        "href": "https://arxiv.org/abs/2405.12110"
+      },
+      {
+        "id": "ipsm",
+        "label": "IPSM-Gaussian — NeurIPS 2024",
+        "href": "https://proceedings.neurips.cc/paper_files/paper/2024/file/362d683723e7d6c12a093961ec2e5051-Paper-Conference.pdf"
+      },
+      {
+        "id": "syn3r",
+        "label": "SYN3R — NeurIPS 2025",
+        "href": "https://proceedings.neurips.cc/paper_files/paper/2025/hash/4254e856d01a5e7b7ea050477c3ef9b9-Abstract-Conference.html"
+      },
+      {
+        "id": "coadapt",
+        "label": "Co-Adaptation — NeurIPS 2025",
+        "href": "https://papers.neurips.cc/paper_files/paper/2025/hash/a831bd2b1bf8935641a5c890a158c519-Abstract-Conference.html"
+      },
+      {
+        "id": "edgenerf",
+        "label": "EdgeNeRF — arXiv 2026",
+        "href": "https://arxiv.org/abs/2601.01431"
+      },
+      {
+        "id": "icogs",
+        "label": "ICO-GS — CVPR 2026",
+        "href": "https://openaccess.thecvf.com/content/CVPR2026/papers/Xiong_Intrinsic_Geometry-Appearance_Consistency_Optimization_for_Sparse-View_Gaussian_Splatting_CVPR_2026_paper.pdf"
+      }
+    ],
+    "blocks": [
+      {
+        "id": "title",
+        "type": "markdown",
+        "body": "# DiffusioNeRF 稀疏视点实验补全计划书（2024–2026 新方法对比）"
+      },
+      {
+        "id": "executive_summary",
+        "type": "markdown",
+        "body": "## Executive Summary\n\n本计划的主结论是：**不复现调研方法，只引用其原论文报告值；需要新跑的全部是本项目方法。** 最终可直接进入论文主比较的候选共 7 组：2024 年 DNGaussian、CoR-GS、IPSM-Gaussian；2025 年 SYN3R、Binocular3DGS + Gaussian Dropout；2026 年 EdgeNeRF、ICO-GS。其中 EdgeNeRF 是预印本，必须在表中标注；其余为正式会议论文。\n\n实验采用两套完全独立的配置。A 是“论文叙述忠实配置”，用于论文主结论；B 是“项目历史兼容配置”，用于解释当前代码与 `test/` 结果。两套配置不得按场景择优混合。执行顺序为：先冻结划分和评测，再补全 3-view 全场景主结果，然后消融，最后补 9-view 与 6-view。主矩阵需要 345 次训练；去重后的必要消融再增加 81 次，共 426 次唯一训练运行。"
+      },
+      {
+        "id": "headline_metrics",
+        "type": "metric-strip",
+        "cardIds": [
+          "qualified_methods",
+          "config_count",
+          "benchmark_scenes",
+          "planned_runs"
+        ]
+      },
+      {
+        "id": "psnr_chart",
+        "type": "chart",
+        "chartId": "psnr_3view_comparison",
+        "layout": "full"
+      },
+      {
+        "id": "research_conclusion",
+        "type": "markdown",
+        "body": "## 一、调研结论：主表应加入哪些新方法\n\n### P0：主表必放\n\n1. **ICO-GS（CVPR 2026，3DGS）**：是当前清单中最新、协议最完整的强基线，在 LLFF/DTU 均报告 3/6/9-view，且给出三次独立运行均值。3-view 为 LLFF 22.20/0.778/0.157，DTU 21.77/0.888/0.092（PSNR/SSIM/LPIPS）。它决定本项目 3-view 主结果的竞争门槛。\n2. **SYN3R（NeurIPS 2025，3DGS + 视频扩散）**：与本项目“用生成先验改善未观测视角”的动机最接近。3-view 为 LLFF 20.61/0.705/0.201，DTU 20.51/0.840/0.137。论文只需引用，不复现。\n3. **IPSM-Gaussian（NeurIPS 2024，3DGS + 图像扩散）**：与本项目的扩散正则最直接。3-view 为 LLFF 20.44/0.702/0.207/0.101，DTU 19.99/0.856/0.121/0.077（含 AVGE），并提供 LLFF 6/9-view。\n4. **EdgeNeRF（2026 预印本，NeRF）**：它是当前筛选中唯一同时满足“2026、NeRF 表示、LLFF+DTU、原文有聚合数值”的同类方法。3-view 为 LLFF 19.42/0.699/0.317，DTU 19.42/0.828/0.205。由于未正式同行评审，建议放在 NeRF 分组末尾并标注 arXiv，而不是作为唯一 SOTA 依据。\n\n### P1：主表或补充表强烈建议保留\n\n- **CoR-GS（ECCV 2024）**：不依赖外部生成先验，覆盖 LLFF/DTU 的 3/6/9-view，是观察“纯几何共正则”随视图数变化的最好锚点。\n- **DNGaussian（CVPR 2024）**：深度先验类代表，协议清楚、引用广，3-view 两数据集均有 PSNR/SSIM/LPIPS/AVGE。\n- **Binocular3DGS + Gaussian Dropout（NeurIPS 2025）**：论文提出的是可插拔正则而非单一独立重建器，因此表中必须写完整基线名。建议固定使用 dropout p=0.2 这一行：LLFF 22.12/0.777/0.154，DTU 21.03/0.875/0.108，不要按数据集混用 opacity-noise 或 both 的更优单项。\n\n### 不进入主表的筛选结果\n\n- DWTNeRF（2025）只给出 LLFF 与 NeRF-Synthetic，未同时给 DTU，不能满足本轮主表条件。\n- TrackNeRF（2024）主要评估 DTU 的稀疏且噪声位姿问题，任务假设不同。\n- PViGS（2026）确认使用 LLFF/DTU 3/6/9-view，但正式卷期在 2026 年 10 月，当前公开页面不足以逐项核对完整作者表格；在拿到作者版精确数值前只列为候补。\n- ReconFusion 等只覆盖部分所需数据集或视图设置，可在相关工作叙述中引用，但不与主表聚合值并列。"
+      },
+      {
+        "id": "literature_table_block",
+        "type": "table",
+        "tableId": "literature_results",
+        "layout": "full"
+      },
+      {
+        "id": "fairness",
+        "type": "markdown",
+        "body": "## 二、这些作者报告值怎样才能安全放进论文\n\n可以直接放入论文，但表题必须写成 **“Published results under the standard sparse-view protocols”** 或中文等价表述，并为每一行保留原论文引用。不能写成“我们统一复现”。建议增加三列：`Representation`、`External prior / initialization`、`Source`。\n\n必须明确的公平性边界：\n\n- 3DGS 与 NeRF 的渲染表示、背景行为和训练速度不同；质量指标可横向参考，但不能据此声称某个正则项本身绝对优于另一项。\n- 初始化并不一致：DNGaussian 原版使用随机初始化，IPSM 多数场景用稀疏 SfM，ICO-GS 使用更密的点云初始化，SYN3R 还使用预训练视频扩散模型。表中要显式标注外部先验。\n- DTU 必须使用 object mask。若本项目不做 mask，所得 PSNR/SSIM/LPIPS 不能与这些论文值并列。\n- 作者报告值可能使用略有差异的 SSIM 实现。新实验需冻结同一评测脚本，并在附录中注明 LPIPS-Alex、颜色范围、背景和聚合顺序。\n- 所有粗体/下划线排名应在相同数据集、视图数、评测掩码下分别计算；不能把 LLFF 6/9-view 与 DTU 3-view 放在同一排名列。"
+      },
+      {
+        "id": "existing_audit",
+        "type": "markdown",
+        "body": "## 三、当前 `test/` 结果与代码配置审计\n\n现有结果**不足以作为新主表的最终数值**。`test/our/定量指标.txt` 只整理了 fern、room、scan41、scan63 的 3/9-view 若干行，不是 LLFF 8 场景或 DTU 15 场景的标准聚合。`test/` 下没有随结果保存的训练日志、checkpoint、命令行参数、seed 或 split manifest，因此无法从文件名反推出完整配置。\n\n当前启动脚本能确定的显式配置是：FP16；LLFF 3-view 时 `--iters 15000`、DiffusioNeRF 正则从 1000 step 开始；`dist_lambda=2e-5`、`fg_lambda=1e-4`、`patch_size=4`、`depth_reg_lambda=0.1`；启用 color/sigma NLL、color frequency mask、near-pixel smoothing（1e-5）；按场景使用特定 scale/bound。脚本当前只循环 fern/3-view，且没有启用 `--neurtv`。\n\n更重要的是，当前代码含有脚本未显式写出的行为：虚拟射线在 global step 1000 自动开启，K=10、JSD 阈值 0.02，深度损失权重实际回退为 0.1；NeuraTV 默认起点为 3000，但只有传入 `--neurtv` 才启用；学习率是 1e-2 到 1e-3，而不是论文写的 2e-2 到 2e-5；非 CUDA ray 模式每条射线使用 64 个基础采样加 128 个上采样。\n\n当前 `nerf/provider.py` 的 colmap 划分是 train=`frames[5:]`、val=`frames[:1]`、test=`frames[1:5]`，并在 train 子集中用 `linspace` 做 few-shot；这不是标准 LLFF holdout，而且可能把标准测试帧放进训练池。现有某些导出结果的测试图数量恰好与标准 holdout 一致，只能说明导出数量相符，不能证明训练 ID、代码版本和评测协议相符。\n\n因此，B 配置的定位是“根据现有结果反推的兼容目标”，不是“已被日志审计证明的历史真值”。旧图可以用于定性对照和回归检查，旧数字不能与新聚合表直接合并。"
+      },
+      {
+        "id": "config_intro",
+        "type": "markdown",
+        "body": "## 四、两套实验配置：冻结后分别报告\n\n### A：论文叙述忠实配置（论文主结果）\n\n- 单卡 48 GB 虗拟 GPU、CUDA 12.8、Python 3.8；若当前机器不能精确提供该环境，需用容器记录等价软件栈，并在论文中写“recreated environment”。\n- Adam；初始学习率 2e-2，按 optimizer step 指数衰减至 2e-5；总计 35,000 optimizer steps。\n- 每 step 4096 rays；论文写 128 samples/ray、batch size 32。需要在实现里把这两个量分别映射为 `num_steps=128, upsample_steps=0` 与 loader/patch batch，不能把 batch size 32误写成 4096 rays。\n- 虚拟射线增强从 step 3500 开始；K=10；JSD 阈值 0.02；深度一致性权重按论文/公式固定为 1e-7。\n- NeuraTV 从 step 5000 开始，权重 1e-7，采样点 4096；DiffusioNeRF 原有正则参数保持论文叙述值。\n- 主设置只跑 3-view 与 9-view；最终 3 个 seeds：0、1、2。\n\n### B：项目历史兼容配置（附录与回归结果）\n\n- 当前机器实测环境：RTX 4080 SUPER 虗拟 GPU（32760 MiB）、Python 3.8.10、PyTorch 2.0.0+cu118；开启 FP16。\n- Adam，betas=(0.9,0.99)，eps=1e-15；学习率 1e-2，按 optimizer step 指数衰减至 1e-3；固定 30,000 optimizer steps。这里以 optimizer step 为准，不使用 `ep10000` 之类文件名代替训练量。\n- 4096 rays/step；64 个基础采样 + 128 个上采样；patch size 4。\n- DiffusioNeRF：start=1000，dist=2e-5，foreground=1e-4，depth=0.1，near-pixel smoothing=1e-5，启用 color/sigma NLL 与 color frequency mask。\n- 虚拟射线：start=1000、K=10、JSD=0.02、depth weight=0.1，全部改为显式 CLI 参数，禁止依赖 `getattr` 回退值。\n- Full 模型显式启用 NeuraTV：start=3000、lambda=1e-7、4096 samples。为了与旧目录建立桥接，消融中另跑 ray-only 与 TV-only。\n- LLFF 沿用脚本的 scene-specific scale/bound；DTU 显式使用 scale=0.33、bound=2.0、downscale=4，并在 smoke test 中检查所有相机中心和 near/far 有效。B 跑 3/6/9-view，seeds 0、1、2。\n\n如果正文只能留一个 `Ours`，必须选择 A；B 写成 `Ours (implementation-compatible)` 放附录。禁止在 LLFF 用 A、DTU 用 B，或逐场景选高分。"
+      },
+      {
+        "id": "config_table_block",
+        "type": "table",
+        "tableId": "config_comparison",
+        "layout": "full"
+      },
+      {
+        "id": "data_protocol",
+        "type": "markdown",
+        "body": "## 五、统一数据协议与评测定义\n\n### LLFF\n\n场景固定为 `{fern, flower, fortress, horns, leaves, orchids, room, trex}`。每个场景先按原始相机轨迹编号，测试集固定为 `i mod 8 = 0`；再从剩余有序训练池中按确定性 half-up rounding 的 linspace 位置选 3/6/9 张。运行时不重新抽样，而是读取版本化的 split JSON。图片统一 8× 下采样；每个场景等权聚合。\n\n数据预检发现 flower、fortress、horns、leaves 的 `transforms.json` 分别有 34、42、62、26 个路径带错误前缀。现已只修改 `file_path`、保持 frame 顺序和位姿不变；全量复检确认 LLFF 8 场景共 305/305 张图片存在、可解码且无重复路径。orchids 的 `s/images/...` 与实际目录一致，因此保留。\n\n### DTU\n\n场景固定为 `{8,21,30,31,34,38,40,41,45,55,63,82,103,110,114}`。训练 ID 使用嵌套集合：3-view=`[25,22,28]`；6-view=`[25,22,28,40,44,48]`；9-view=`[25,22,28,40,44,48,0,8,13]`。测试 ID 固定为 `[1,2,9,10,11,12,14,15,23,24,26,27,29,30,31,32,33,34,35,41,42,43,45,46,47]`。图像 4× 下采样；所有指标只在 object mask 内计算；15 个场景等权聚合。\n\n### 指标与聚合\n\n- 每张测试图先计算 PSNR、SSIM、LPIPS-Alex；DTU 先应用同一个 object mask。\n- 每场景对测试图取平均；数据集结果再对场景取等权平均，防止测试图较多的场景权重更大。\n- 每个 seed 得到一个数据集均值；论文报告 3 seeds 的 mean ± std。\n- AVGE 使用 `MSE=10^(-PSNR/10)`，然后计算 `geomean(sqrt(1-SSIM), LPIPS, MSE)`；必须固定是在数据集聚合指标上计算，且和引用论文保持一致。\n- 同时导出 per-view、per-scene、per-seed 和 final aggregate 四级 CSV/JSON，确保任何表格值都可重算。"
+      },
+      {
+        "id": "split_table_block",
+        "type": "table",
+        "tableId": "llff_split_ids",
+        "layout": "full"
+      },
+      {
+        "id": "priority_intro",
+        "type": "markdown",
+        "body": "## 六、执行优先级与运行规模\n\n### P0 — 协议和可复现性修复（任何大规模训练前）\n\n1. 新增标准 split manifest 生成器与加载逻辑，禁止使用 `frames[5:]` 和运行时 linspace。\n2. 验证已完成的 LLFF 四个场景 JSON 路径修复；继续逐场景校验 frame 数、图片尺寸、相机矩阵和 ID 顺序。\n3. 给虚拟射线的 enable/start/K/JSD/depth-lambda 全部增加 CLI；把 NeuraTV、scheduler 终点、samples/ray 也写入显式配置。\n4. 新建独立 A/B 配置文件和启动器；每次运行保存解析后的完整配置、split hash、git commit、环境、GPU、seed。\n5. 建立统一 evaluator；对已知小样本渲染做 PSNR/SSIM/LPIPS/AVGE 单元测试。\n\n### P1 — 3-view 全场景主结果\n\n这是最高价值实验，因为所有 7 组新方法都有 3-view LLFF/DTU 数值。先各跑 seed 0：A 和 B 共 46 次；质量门通过后补 seeds 1/2，最终 138 次。先生成不带新基线排名的内部表，确认没有划分泄漏，再生成论文表。\n\n### P2 — 关键消融\n\nA 在全部 23 个场景、3-view、seed 0 上跑四组：DiffusioNeRF baseline、+Virtual Ray、+NeuraTV、Full；其中 Full 已在 P1，新增 69 次。B 只在 `{fern, room, scan41, scan63}` 做相同桥接消融，Full 已在 P1，新增 12 次。合计增量 81 次。若 A 的两个模块不能分别带来稳定改进，先解释或修复，暂缓 6/9-view 扩展。\n\n### P3 — 9-view 主结果\n\nA、B 均在 LLFF 8 + DTU 15、3 seeds 上运行，共 138 次。用于补齐论文原有 9-view 叙述，并直接对比 CoR-GS、ICO-GS，以及 LLFF 上的 IPSM-Gaussian。\n\n### P4 — 6-view 扩展\n\n只跑 B：23 场景 × 3 seeds = 69 次。A 不跑 6-view，因为论文没有把它定义为主设置；若之后正文决定加入 6-view，再把 A-6 作为明确的新增协议，而不是悄悄塞进 A。\n\n### P5 — 定性、效率与鲁棒性\n\n不额外训练：从已完成模型统一导出 LLFF `{fern, flower, leaves, room}` 和 DTU `{30,41,63,103}` 的同 ID crop、RGB、depth；在相同硬件上记录单场景训练墙钟时间、峰值显存、checkpoint 大小和渲染 FPS。效率只与本项目 A/B 比较，引用论文的异构硬件速度单独列出，不做直接倍数宣称。"
+      },
+      {
+        "id": "execution_table_block",
+        "type": "table",
+        "tableId": "execution_matrix",
+        "layout": "full"
+      },
+      {
+        "id": "acceptance",
+        "type": "markdown",
+        "body": "## 七、每个阶段的操作清单与验收门槛\n\n### 数据门槛\n\n- LLFF 每场景 test 数必须为 3/5/6/8/4/4/6/7；DTU 每场景 test 数必须为 25。\n- `train ∩ test = ∅`，3-view ⊂ 6-view ⊂ 9-view（DTU）；所有 split 文件有 SHA256。\n- 8 个 LLFF 与 15 个 DTU 场景 100% 可读；没有静默 `continue` 跳过图像。\n\n### 训练门槛\n\n- 日志中的 global optimizer step 精确等于 A=35000 或 B=30000；epoch 只作显示，不作为训练预算。\n- 记录首、模块启用点、末尾三个关键 step 的 learning rate 和损失项；A 的 virtual/TV 分别在 3500/5000 启用，B 在 1000/3000 启用。\n- 无 NaN/Inf；每个 scene/seed 都保存 final checkpoint、config、split、metrics 与渲染。\n- smoke test 中 A/B 的相机半径、near/far、有效采样比例和虚拟射线通过率均在合理范围；异常场景不能通过修改独立超参绕开，除非论文明确报告 per-scene 参数。\n\n### 评测门槛\n\n- 用保存的预测图重新计算一次指标，和训练日志汇总误差小于 1e-6（浮点显示误差除外）。\n- DTU mask 覆盖率与测试脚本记录一致；背景像素不进入指标。\n- 数据集均值从 per-scene CSV 重算一致；mean ± std 从三个 seed 汇总一致。\n- 同一张论文表只使用一个配置标签、一个 split version、一个 evaluator version。\n\n### 结果决策门槛\n\n- P1 seed 0 完成后，不根据单场景分数换配置；只允许修复可证明的代码/协议错误，然后整组重跑。\n- Full 相比 baseline 的主要主张至少需在两个数据集的多数 seeds 上方向一致；如果只有单一指标改善，论文叙述要收缩到该指标。\n- 新方法作者报告值永远保留 `reported` 标签；本项目结果保留 `ours-run` 标签。"
+      },
+      {
+        "id": "paper_plan",
+        "type": "markdown",
+        "body": "## 八、论文中最终应出现的表格与图\n\n1. **主表 1：3-view LLFF/DTU。** 按 NeRF 与 3DGS 分组，列 PSNR、SSIM、LPIPS、AVGE；包含 EdgeNeRF、DNGaussian、CoR-GS、IPSM、SYN3R、Gaussian Dropout、ICO-GS，以及 `Ours-A`。若版面允许，`Ours-B` 只作为灰色附录引用，不与 A 合并。\n2. **主表 2：9-view LLFF/DTU。** 放 CoR-GS、ICO-GS、IPSM（DTU 无 9-view 报告则写 `—`）与 Ours-A；Ours-B 放补充材料。\n3. **补充表：6-view。** 放 CoR-GS、IPSM（LLFF）、ICO-GS 与 Ours-B，明确 B 是 implementation-compatible protocol。\n4. **消融表：3-view。** 四行 baseline / +ray / +TV / full；正文报告 A 的全数据集结果，B 的四场景桥接表放附录。\n5. **定性图。** 每数据集至少两个困难场景，固定同一测试 ID 和 crop；包含 RGB、error map、depth。禁止不同方法选不同测试图。\n6. **效率表。** A/B 的训练时间、峰值显存、模型大小、FPS；作者论文速度只作脚注，注明硬件。\n\n推荐论文表注：`Published baseline values are transcribed from the original papers under their reported standard sparse-view protocols; only our method is executed in this project. DTU metrics are mask-aware. EdgeNeRF is an arXiv preprint.`\n\n推荐实验设置叙述分两段：正文只完整叙述 A；附录单独写 B，并解释它源于当前实现和历史结果审计。不要在同一段里把 A 的 35k/2e-2→2e-5 与 B 的 30k/1e-2→1e-3 混写。"
+      },
+      {
+        "id": "risks",
+        "type": "markdown",
+        "body": "## 九、限制、风险与应对\n\n- **历史结果无法追溯。** 没有日志和 split，不能证明旧数字对应哪个 commit。应对：旧结果只作回归阈值；新结果全量重跑并保存 provenance。\n- **论文与代码参数冲突。** 虚拟射线 start/lambda、TV start、LR 终点、采样数均不一致。应对：A/B 两套显式配置；任何默认值都打印进 config。\n- **训练预算定义混乱。** 现有文件名 `ep10000` 在 3-view 下可能对应约 30000 optimizer steps。应对：所有表只写 global optimizer steps。\n- **DTU 缺少当前启动器。** 应对：先实现标准 15 场景 manifest 和统一 runner，不从 scan41/63 的旧目录复制命令。\n- **跨表示比较的先验差异。** 应对：表中增加初始化/外部先验列，结论聚焦最终重建质量，不把差距全归因于单个正则项。\n- **2026 结果仍快速变化。** 应对：论文定稿前再次核对 ICO-GS 正式版页码和 EdgeNeRF 状态；新增方法只有满足相同准入条件才加入。\n- **运行成本较大。** 应对：每个优先级设置硬门槛；P1 seed 0 或 P2 消融失败时停止扩展，不盲目跑完 426 次。"
+      },
+      {
+        "id": "deliverables",
+        "type": "markdown",
+        "body": "## 十、最终交付物与目录规范\n\n每个训练目录必须包含：`resolved_config.yaml`、`split.json`、`split.sha256`、`environment.json`、`git_commit.txt`、`train.log`、`checkpoint.pth`、`per_view_metrics.csv`、`scene_summary.json`、`renders/`。建议目录为：\n\n`runs/{A-paper|B-project}/{LLFF|DTU}/{3v|6v|9v}/{scene}/seed_{0|1|2}/`\n\n聚合输出为：\n\n`results/{config}/{dataset}/{views}/per_scene.csv`\n\n`results/{config}/{dataset}/{views}/per_seed.csv`\n\n`results/{config}/{dataset}/{views}/summary_mean_std.json`\n\n`paper_tables/table_{main3v|main9v|supp6v|ablation}.csv`\n\n完成定义：P0–P4 所需运行全部通过门槛；任何表格单元都能追溯到 scene/seed；论文主表只用 A；B 单独标注；7 组调研方法的数字与原论文表格逐项复核；定性图与定量表使用完全相同的 split。"
+      },
+      {
+        "id": "questions",
+        "type": "markdown",
+        "body": "## 十一、执行前保留的非阻塞确认项\n\n本计划已给出默认决策，可以直接实施；以下事项只会影响资源排期，不改变协议：\n\n- 48 GB/CUDA 12.8 的 A 环境是否可长期占用；若不能，使用当前 32 GB vGPU 时要先验证 A 的 batch/采样是否需要梯度累积，并保持有效 rays 不变。\n- 论文中的 `batch size 32` 究竟指图片批量、patch 批量还是内部采样批量。默认做法是保持论文原文并在实现映射表中记录，不用它覆盖 `4096 rays/step`。\n- 如果总预算不足，停止顺序为 P4 → P3 的 B-9 → B 桥接消融；P0、P1 和 A 的关键消融不可删。\n\n这些确认不需要重新调研对比方法，也不授权复现任何外部方法。"
+      },
+      {
+        "id": "sources_section",
+        "type": "markdown",
+        "body": "## Sources and reproducibility\n\n数值来源均为原论文或官方会议页面：DNGaussian（CVPR 2024）、CoR-GS（ECCV 2024 作者版）、IPSM-Gaussian（NeurIPS 2024）、SYN3R（NeurIPS 2025）、Co-Adaptation（NeurIPS 2025）、ICO-GS（CVPR 2026）以及 EdgeNeRF（arXiv 2026 预印本）。本项目判断来自本地论文、`run_DiffusioNeRF_LLFF.sh`、`main_nerf.py`、`nerf/provider.py` 与 `test/our/定量指标.txt`。完整可引用矩阵保存在同目录的 `comparison_matrix.csv`。"
+      }
+    ]
+  },
+  "snapshot": {
+    "version": 1,
+    "generatedAt": "2026-07-28T00:00:00Z",
+    "status": "ready",
+    "datasets": {
+      "summary": [
+        {
+          "qualified_methods": 7,
+          "config_count": 2,
+          "benchmark_scenes": 23,
+          "planned_runs": 426
+        }
+      ],
+      "psnr_3view": [
+        {
+          "year": 2024,
+          "method": "DNGaussian",
+          "family": "3DGS",
+          "venue": "CVPR 2024",
+          "status": "peer-reviewed",
+          "dataset": "LLFF",
+          "views": 3,
+          "psnr": 19.12,
+          "ssim": 0.591,
+          "lpips": 0.294,
+          "avge": 0.132,
+          "source_url": "https://openaccess.thecvf.com/content/CVPR2024/papers/Li_DNGaussian_Optimizing_Sparse-View_3D_Gaussian_Radiance_Fields_with_Global-Local_Depth_CVPR_2024_paper.pdf"
+        },
+        {
+          "year": 2024,
+          "method": "DNGaussian",
+          "family": "3DGS",
+          "venue": "CVPR 2024",
+          "status": "peer-reviewed",
+          "dataset": "DTU",
+          "views": 3,
+          "psnr": 18.91,
+          "ssim": 0.79,
+          "lpips": 0.176,
+          "avge": 0.102,
+          "source_url": "https://openaccess.thecvf.com/content/CVPR2024/papers/Li_DNGaussian_Optimizing_Sparse-View_3D_Gaussian_Radiance_Fields_with_Global-Local_Depth_CVPR_2024_paper.pdf"
+        },
+        {
+          "year": 2024,
+          "method": "CoR-GS",
+          "family": "3DGS",
+          "venue": "ECCV 2024",
+          "status": "peer-reviewed",
+          "dataset": "LLFF",
+          "views": 3,
+          "psnr": 20.45,
+          "ssim": 0.712,
+          "lpips": 0.196,
+          "avge": 0.101,
+          "source_url": "https://arxiv.org/abs/2405.12110"
+        },
+        {
+          "year": 2024,
+          "method": "CoR-GS",
+          "family": "3DGS",
+          "venue": "ECCV 2024",
+          "status": "peer-reviewed",
+          "dataset": "DTU",
+          "views": 3,
+          "psnr": 19.21,
+          "ssim": 0.853,
+          "lpips": 0.119,
+          "avge": 0.087,
+          "source_url": "https://arxiv.org/abs/2405.12110"
+        },
+        {
+          "year": 2024,
+          "method": "IPSM-Gaussian",
+          "family": "3DGS + diffusion",
+          "venue": "NeurIPS 2024",
+          "status": "peer-reviewed",
+          "dataset": "LLFF",
+          "views": 3,
+          "psnr": 20.44,
+          "ssim": 0.702,
+          "lpips": 0.207,
+          "avge": 0.101,
+          "source_url": "https://proceedings.neurips.cc/paper_files/paper/2024/file/362d683723e7d6c12a093961ec2e5051-Paper-Conference.pdf"
+        },
+        {
+          "year": 2024,
+          "method": "IPSM-Gaussian",
+          "family": "3DGS + diffusion",
+          "venue": "NeurIPS 2024",
+          "status": "peer-reviewed",
+          "dataset": "DTU",
+          "views": 3,
+          "psnr": 19.99,
+          "ssim": 0.856,
+          "lpips": 0.121,
+          "avge": 0.077,
+          "source_url": "https://proceedings.neurips.cc/paper_files/paper/2024/file/362d683723e7d6c12a093961ec2e5051-Paper-Conference.pdf"
+        },
+        {
+          "year": 2025,
+          "method": "SYN3R",
+          "family": "3DGS + video diffusion",
+          "venue": "NeurIPS 2025",
+          "status": "peer-reviewed",
+          "dataset": "LLFF",
+          "views": 3,
+          "psnr": 20.61,
+          "ssim": 0.705,
+          "lpips": 0.201,
+          "avge": null,
+          "source_url": "https://proceedings.neurips.cc/paper_files/paper/2025/hash/4254e856d01a5e7b7ea050477c3ef9b9-Abstract-Conference.html"
+        },
+        {
+          "year": 2025,
+          "method": "SYN3R",
+          "family": "3DGS + video diffusion",
+          "venue": "NeurIPS 2025",
+          "status": "peer-reviewed",
+          "dataset": "DTU",
+          "views": 3,
+          "psnr": 20.51,
+          "ssim": 0.84,
+          "lpips": 0.137,
+          "avge": null,
+          "source_url": "https://proceedings.neurips.cc/paper_files/paper/2025/hash/4254e856d01a5e7b7ea050477c3ef9b9-Abstract-Conference.html"
+        },
+        {
+          "year": 2025,
+          "method": "Gaussian Dropout",
+          "family": "3DGS regularization",
+          "venue": "NeurIPS 2025",
+          "status": "peer-reviewed",
+          "dataset": "LLFF",
+          "views": 3,
+          "psnr": 22.12,
+          "ssim": 0.777,
+          "lpips": 0.154,
+          "avge": null,
+          "source_url": "https://papers.neurips.cc/paper_files/paper/2025/hash/a831bd2b1bf8935641a5c890a158c519-Abstract-Conference.html"
+        },
+        {
+          "year": 2025,
+          "method": "Gaussian Dropout",
+          "family": "3DGS regularization",
+          "venue": "NeurIPS 2025",
+          "status": "peer-reviewed",
+          "dataset": "DTU",
+          "views": 3,
+          "psnr": 21.03,
+          "ssim": 0.875,
+          "lpips": 0.108,
+          "avge": null,
+          "source_url": "https://papers.neurips.cc/paper_files/paper/2025/hash/a831bd2b1bf8935641a5c890a158c519-Abstract-Conference.html"
+        },
+        {
+          "year": 2026,
+          "method": "EdgeNeRF",
+          "family": "NeRF",
+          "venue": "arXiv 2026",
+          "status": "preprint",
+          "dataset": "LLFF",
+          "views": 3,
+          "psnr": 19.42,
+          "ssim": 0.699,
+          "lpips": 0.317,
+          "avge": null,
+          "source_url": "https://arxiv.org/abs/2601.01431"
+        },
+        {
+          "year": 2026,
+          "method": "EdgeNeRF",
+          "family": "NeRF",
+          "venue": "arXiv 2026",
+          "status": "preprint",
+          "dataset": "DTU",
+          "views": 3,
+          "psnr": 19.42,
+          "ssim": 0.828,
+          "lpips": 0.205,
+          "avge": null,
+          "source_url": "https://arxiv.org/abs/2601.01431"
+        },
+        {
+          "year": 2026,
+          "method": "ICO-GS",
+          "family": "3DGS",
+          "venue": "CVPR 2026",
+          "status": "peer-reviewed",
+          "dataset": "LLFF",
+          "views": 3,
+          "psnr": 22.2,
+          "ssim": 0.778,
+          "lpips": 0.157,
+          "avge": null,
+          "source_url": "https://openaccess.thecvf.com/content/CVPR2026/papers/Xiong_Intrinsic_Geometry-Appearance_Consistency_Optimization_for_Sparse-View_Gaussian_Splatting_CVPR_2026_paper.pdf"
+        },
+        {
+          "year": 2026,
+          "method": "ICO-GS",
+          "family": "3DGS",
+          "venue": "CVPR 2026",
+          "status": "peer-reviewed",
+          "dataset": "DTU",
+          "views": 3,
+          "psnr": 21.77,
+          "ssim": 0.888,
+          "lpips": 0.092,
+          "avge": null,
+          "source_url": "https://openaccess.thecvf.com/content/CVPR2026/papers/Xiong_Intrinsic_Geometry-Appearance_Consistency_Optimization_for_Sparse-View_Gaussian_Splatting_CVPR_2026_paper.pdf"
+        }
+      ],
+      "literature_results": [
+        {"year":2024,"method":"DNGaussian","family":"3DGS","venue":"CVPR 2024","status":"peer-reviewed","dataset":"LLFF","views":3,"psnr":19.12,"ssim":0.591,"lpips":0.294,"avge_display":"0.132"},
+        {"year":2024,"method":"DNGaussian","family":"3DGS","venue":"CVPR 2024","status":"peer-reviewed","dataset":"DTU","views":3,"psnr":18.91,"ssim":0.790,"lpips":0.176,"avge_display":"0.102"},
+        {"year":2024,"method":"CoR-GS","family":"3DGS","venue":"ECCV 2024","status":"peer-reviewed","dataset":"LLFF","views":3,"psnr":20.45,"ssim":0.712,"lpips":0.196,"avge_display":"0.101"},
+        {"year":2024,"method":"CoR-GS","family":"3DGS","venue":"ECCV 2024","status":"peer-reviewed","dataset":"LLFF","views":6,"psnr":24.49,"ssim":0.837,"lpips":0.115,"avge_display":"0.060"},
+        {"year":2024,"method":"CoR-GS","family":"3DGS","venue":"ECCV 2024","status":"peer-reviewed","dataset":"LLFF","views":9,"psnr":26.06,"ssim":0.874,"lpips":0.089,"avge_display":"0.046"},
+        {"year":2024,"method":"CoR-GS","family":"3DGS","venue":"ECCV 2024","status":"peer-reviewed","dataset":"DTU","views":3,"psnr":19.21,"ssim":0.853,"lpips":0.119,"avge_display":"0.087"},
+        {"year":2024,"method":"CoR-GS","family":"3DGS","venue":"ECCV 2024","status":"peer-reviewed","dataset":"DTU","views":6,"psnr":24.51,"ssim":0.917,"lpips":0.068,"avge_display":"0.046"},
+        {"year":2024,"method":"CoR-GS","family":"3DGS","venue":"ECCV 2024","status":"peer-reviewed","dataset":"DTU","views":9,"psnr":27.18,"ssim":0.947,"lpips":0.045,"avge_display":"0.029"},
+        {"year":2024,"method":"IPSM-Gaussian","family":"3DGS + diffusion","venue":"NeurIPS 2024","status":"peer-reviewed","dataset":"LLFF","views":3,"psnr":20.44,"ssim":0.702,"lpips":0.207,"avge_display":"0.101"},
+        {"year":2024,"method":"IPSM-Gaussian","family":"3DGS + diffusion","venue":"NeurIPS 2024","status":"peer-reviewed","dataset":"LLFF","views":6,"psnr":23.94,"ssim":0.818,"lpips":0.135,"avge_display":"0.061"},
+        {"year":2024,"method":"IPSM-Gaussian","family":"3DGS + diffusion","venue":"NeurIPS 2024","status":"peer-reviewed","dataset":"LLFF","views":9,"psnr":25.13,"ssim":0.855,"lpips":0.111,"avge_display":"0.051"},
+        {"year":2024,"method":"IPSM-Gaussian","family":"3DGS + diffusion","venue":"NeurIPS 2024","status":"peer-reviewed","dataset":"DTU","views":3,"psnr":19.99,"ssim":0.856,"lpips":0.121,"avge_display":"0.077"},
+        {"year":2025,"method":"SYN3R","family":"3DGS + video diffusion","venue":"NeurIPS 2025","status":"peer-reviewed","dataset":"LLFF","views":3,"psnr":20.61,"ssim":0.705,"lpips":0.201,"avge_display":"—"},
+        {"year":2025,"method":"SYN3R","family":"3DGS + video diffusion","venue":"NeurIPS 2025","status":"peer-reviewed","dataset":"DTU","views":3,"psnr":20.51,"ssim":0.840,"lpips":0.137,"avge_display":"—"},
+        {"year":2025,"method":"Binocular3DGS + Dropout","family":"3DGS regularization","venue":"NeurIPS 2025","status":"peer-reviewed","dataset":"LLFF","views":3,"psnr":22.12,"ssim":0.777,"lpips":0.154,"avge_display":"—"},
+        {"year":2025,"method":"Binocular3DGS + Dropout","family":"3DGS regularization","venue":"NeurIPS 2025","status":"peer-reviewed","dataset":"DTU","views":3,"psnr":21.03,"ssim":0.875,"lpips":0.108,"avge_display":"—"},
+        {"year":2026,"method":"EdgeNeRF","family":"NeRF","venue":"arXiv 2026","status":"preprint","dataset":"LLFF","views":3,"psnr":19.42,"ssim":0.699,"lpips":0.317,"avge_display":"—"},
+        {"year":2026,"method":"EdgeNeRF","family":"NeRF","venue":"arXiv 2026","status":"preprint","dataset":"DTU","views":3,"psnr":19.42,"ssim":0.828,"lpips":0.205,"avge_display":"—"},
+        {"year":2026,"method":"ICO-GS","family":"3DGS","venue":"CVPR 2026","status":"peer-reviewed","dataset":"LLFF","views":3,"psnr":22.20,"ssim":0.778,"lpips":0.157,"avge_display":"—"},
+        {"year":2026,"method":"ICO-GS","family":"3DGS","venue":"CVPR 2026","status":"peer-reviewed","dataset":"LLFF","views":6,"psnr":25.37,"ssim":0.856,"lpips":0.109,"avge_display":"—"},
+        {"year":2026,"method":"ICO-GS","family":"3DGS","venue":"CVPR 2026","status":"peer-reviewed","dataset":"LLFF","views":9,"psnr":26.45,"ssim":0.881,"lpips":0.096,"avge_display":"—"},
+        {"year":2026,"method":"ICO-GS","family":"3DGS","venue":"CVPR 2026","status":"peer-reviewed","dataset":"DTU","views":3,"psnr":21.77,"ssim":0.888,"lpips":0.092,"avge_display":"—"},
+        {"year":2026,"method":"ICO-GS","family":"3DGS","venue":"CVPR 2026","status":"peer-reviewed","dataset":"DTU","views":6,"psnr":25.09,"ssim":0.928,"lpips":0.064,"avge_display":"—"},
+        {"year":2026,"method":"ICO-GS","family":"3DGS","venue":"CVPR 2026","status":"peer-reviewed","dataset":"DTU","views":9,"psnr":27.19,"ssim":0.953,"lpips":0.045,"avge_display":"—"}
+      ],
+      "config_comparison": [
+        {"order":1,"dimension":"用途","config_a":"论文主结果与方法主张","config_b":"历史结果桥接、实现回归与附录","reporting_rule":"独立标签；禁止择优混合"},
+        {"order":2,"dimension":"硬件/软件","config_a":"单卡 48GB vGPU；CUDA 12.8；Python 3.8","config_b":"RTX 4080 SUPER vGPU 32760MiB；Python 3.8.10；PyTorch 2.0.0+cu118","reporting_rule":"分别记录实际环境"},
+        {"order":3,"dimension":"视图设置","config_a":"3-view、9-view","config_b":"3-view、6-view、9-view","reporting_rule":"LLFF 8 场景；DTU 15 场景"},
+        {"order":4,"dimension":"随机种子","config_a":"0、1、2","config_b":"0、1、2","reporting_rule":"报告数据集 mean ± std"},
+        {"order":5,"dimension":"优化器","config_a":"Adam（论文叙述）","config_b":"Adam；betas=(0.9,0.99)；eps=1e-15","reporting_rule":"解析后配置入库"},
+        {"order":6,"dimension":"学习率","config_a":"2e-2 指数衰减至 2e-5","config_b":"1e-2 指数衰减至 1e-3","reporting_rule":"按 optimizer step 更新"},
+        {"order":7,"dimension":"训练预算","config_a":"35000 optimizer steps","config_b":"30000 optimizer steps","reporting_rule":"不以 epoch 文件名代替"},
+        {"order":8,"dimension":"射线/采样","config_a":"4096 rays；128 samples/ray；论文另写 batch size 32","config_b":"4096 rays；64 base + 128 upsample；patch 4","reporting_rule":"明确每个量的代码映射"},
+        {"order":9,"dimension":"虚拟射线","config_a":"start 3500；K=10；JSD=0.02；depth λ=1e-7","config_b":"start 1000；K=10；JSD=0.02；depth λ=0.1","reporting_rule":"全部显式 CLI"},
+        {"order":10,"dimension":"NeuraTV","config_a":"start 5000；λ=1e-7；4096 samples","config_b":"start 3000；λ=1e-7；4096 samples","reporting_rule":"Full 模型必须显式启用"},
+        {"order":11,"dimension":"DiffusioNeRF 原有项","config_a":"按论文叙述冻结","config_b":"start 1000；dist 2e-5；fg 1e-4；depth 0.1；smoothing 1e-5；NLL/frequency 开","reporting_rule":"不得依赖默认值"},
+        {"order":12,"dimension":"精度","config_a":"按论文记录；若使用 FP16 必须写明","config_b":"FP16","reporting_rule":"两套配置分别报告"},
+        {"order":13,"dimension":"LLFF 几何缩放","config_a":"沿用项目 scene-specific scale/bound","config_b":"沿用项目 scene-specific scale/bound","reporting_rule":"写入每场景 resolved config"},
+        {"order":14,"dimension":"DTU 几何缩放","config_a":"scale=0.33；bound=2.0；smoke 验证","config_b":"scale=0.33；bound=2.0；smoke 验证","reporting_rule":"不可按场景调参"},
+        {"order":15,"dimension":"评测","config_a":"标准 split；LLFF 8x；DTU 4x + mask；LPIPS-Alex","config_b":"与 A 完全相同","reporting_rule":"同一 evaluator/version"}
+      ],
+      "llff_splits": [
+        {"scene":"fern","test_ids":"0,8,16","train_3":"1,10,19","train_6":"1,4,7,12,15,19","train_9":"1,3,5,7,10,12,14,17,19"},
+        {"scene":"flower","test_ids":"0,8,16,24,32","train_3":"1,17,33","train_6":"1,7,13,20,26,33","train_9":"1,5,9,13,17,21,25,29,33"},
+        {"scene":"fortress","test_ids":"0,8,16,24,32,40","train_3":"1,21,41","train_6":"1,9,17,25,33,41","train_9":"1,5,11,15,21,26,30,36,41"},
+        {"scene":"horns","test_ids":"0,8,16,24,32,40,48,56","train_3":"1,31,61","train_6":"1,13,25,37,49,61","train_9":"1,9,15,23,31,38,46,53,61"},
+        {"scene":"leaves","test_ids":"0,8,16,24","train_3":"1,13,25","train_6":"1,5,10,15,20,25","train_9":"1,4,6,10,13,15,19,21,25"},
+        {"scene":"orchids","test_ids":"0,8,16,24","train_3":"1,12,23","train_6":"1,5,10,14,19,23","train_9":"1,4,6,10,12,15,18,21,23"},
+        {"scene":"room","test_ids":"0,8,16,24,32,40","train_3":"1,20,39","train_6":"1,9,17,23,31,39","train_9":"1,5,11,15,20,25,30,35,39"},
+        {"scene":"trex","test_ids":"0,8,16,24,32,40,48","train_3":"1,28,54","train_6":"1,11,22,33,44,54","train_9":"1,7,14,21,28,34,41,47,54"}
+      ],
+      "execution_matrix": [
+        {"priority":0,"work":"协议、数据和 provenance 修复","matrix":"split/evaluator/CLI/路径/配置保存；4 个代表场景 smoke","unique_runs":0,"deliverable":"可复现 runner、split manifests、评测单测","gate":"23 场景数据预检通过；无泄漏；关键参数显式"},
+        {"priority":1,"work":"3-view 全场景主结果","matrix":"A+B × (LLFF8+DTU15) × seeds0/1/2","unique_runs":138,"deliverable":"主表 3-view；per-scene/per-seed/final aggregate","gate":"seed0 46 次先通过；三 seed 完整；可重算"},
+        {"priority":2,"work":"关键消融","matrix":"A: 23场景×4变体×seed0；B: 4场景×4变体×seed0；扣除 full 重合","unique_runs":81,"deliverable":"论文消融表与历史桥接表","gate":"模块收益方向稳定；失败则暂停扩展"},
+        {"priority":3,"work":"9-view 主结果","matrix":"A+B × 23场景 × 3 seeds","unique_runs":138,"deliverable":"9-view 主表/附录","gate":"与 3-view 相同评测协议；无配置漂移"},
+        {"priority":4,"work":"6-view 扩展","matrix":"B × 23场景 × 3 seeds","unique_runs":69,"deliverable":"6-view 补充表","gate":"P1–P3 结论稳定且预算允许"},
+        {"priority":5,"work":"定性与效率","matrix":"复用已训练 checkpoint；统一 crop/ID；相同硬件 profile","unique_runs":0,"deliverable":"RGB/depth/error 图与效率表","gate":"定性图和定量表 split 完全一致"}
+      ]
+    }
+  },
+  "sources": [
+    {
+      "id": "literature_matrix",
+      "label": "人工核对的作者报告结果矩阵",
+      "path": "reports/sparse_view_experiment_plan_2026-07-28/comparison_matrix.csv",
+      "query": {
+        "engine": "duckdb",
+        "sql": "SELECT * FROM read_csv_auto('reports/sparse_view_experiment_plan_2026-07-28/comparison_matrix.csv') ORDER BY year, method, dataset, views",
+        "language": "manual-transcription",
+        "description": "从原论文表格逐行核对的 2024–2026 LLFF/DTU 结果。",
+        "executed_at": "2026-07-28T00:00:00Z",
+        "filters": [
+          "2024–2026",
+          "同时报告 LLFF 与 DTU",
+          "作者报告聚合结果"
+        ],
+        "metric_definitions": [
+          "PSNR/SSIM/LPIPS/AVGE 均按原论文表格抄录。"
+        ]
+      }
+    },
+    {
+      "id": "execution_plan",
+      "label": "本项目实验审计与执行矩阵",
+      "path": "reports/sparse_view_experiment_plan_2026-07-28/artifact.json",
+      "query": {
+        "engine": "duckdb",
+        "sql": "SELECT 7 AS qualified_methods, 2 AS config_count, 23 AS benchmark_scenes, 426 AS planned_runs",
+        "language": "repository-audit",
+        "description": "依据本地论文、代码、脚本、数据和结果目录制定。",
+        "executed_at": "2026-07-28T00:00:00Z",
+        "metric_definitions": [
+          "23 个标准场景；345 个主矩阵训练；81 个去重消融增量。"
+        ]
+      }
+    },
+    {"id":"local_thesis","label":"本地论文提纯版","path":"稀疏视点下神经辐射场重建的优化方法_提纯版.pdf"},
+    {"id":"local_runner","label":"当前 LLFF 启动脚本","path":"run_DiffusioNeRF_LLFF.sh"},
+    {"id":"local_provider","label":"当前数据加载与划分实现","path":"nerf/provider.py"},
+    {"id":"local_main","label":"当前训练入口与优化器配置","path":"main_nerf.py"},
+    {"id":"local_results","label":"现有人工整理指标","path":"test/our/定量指标.txt"},
+    {"id":"dngaussian","label":"DNGaussian — CVPR 2024","href":"https://openaccess.thecvf.com/content/CVPR2024/papers/Li_DNGaussian_Optimizing_Sparse-View_3D_Gaussian_Radiance_Fields_with_Global-Local_Depth_CVPR_2024_paper.pdf"},
+    {"id":"corgs","label":"CoR-GS — ECCV 2024","href":"https://arxiv.org/abs/2405.12110"},
+    {"id":"ipsm","label":"IPSM-Gaussian — NeurIPS 2024","href":"https://proceedings.neurips.cc/paper_files/paper/2024/file/362d683723e7d6c12a093961ec2e5051-Paper-Conference.pdf"},
+    {"id":"syn3r","label":"SYN3R — NeurIPS 2025","href":"https://proceedings.neurips.cc/paper_files/paper/2025/hash/4254e856d01a5e7b7ea050477c3ef9b9-Abstract-Conference.html"},
+    {"id":"coadapt","label":"Co-Adaptation — NeurIPS 2025","href":"https://papers.neurips.cc/paper_files/paper/2025/hash/a831bd2b1bf8935641a5c890a158c519-Abstract-Conference.html"},
+    {"id":"edgenerf","label":"EdgeNeRF — arXiv 2026","href":"https://arxiv.org/abs/2601.01431"},
+    {"id":"icogs","label":"ICO-GS — CVPR 2026","href":"https://openaccess.thecvf.com/content/CVPR2026/papers/Xiong_Intrinsic_Geometry-Appearance_Consistency_Optimization_for_Sparse-View_Gaussian_Splatting_CVPR_2026_paper.pdf"}
+  ],
+  "package_info": {}
+}
