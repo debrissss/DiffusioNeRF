@@ -8,9 +8,23 @@ cd "$REPO_DIR"
 GPU_ID="${GPU_ID:-0}"
 CKPT_MODE="${CKPT_MODE:-latest}"
 STOP_AT_STEP="${STOP_AT_STEP:-}"
+EVAL_OVERWRITE="${EVAL_OVERWRITE:-0}"
+EVAL_ONLY="${EVAL_ONLY:-0}"
 
 if [[ "$CKPT_MODE" != "latest" && "$CKPT_MODE" != "scratch" ]]; then
     echo "CKPT_MODE must be either 'latest' or 'scratch'." >&2
+    exit 2
+fi
+if [[ "$EVAL_OVERWRITE" != "0" && "$EVAL_OVERWRITE" != "1" ]]; then
+    echo "EVAL_OVERWRITE must be either 0 or 1." >&2
+    exit 2
+fi
+if [[ "$EVAL_ONLY" != "0" && "$EVAL_ONLY" != "1" ]]; then
+    echo "EVAL_ONLY must be either 0 or 1." >&2
+    exit 2
+fi
+if [[ "$EVAL_ONLY" == "1" && "$CKPT_MODE" == "scratch" ]]; then
+    echo "EVAL_ONLY=1 requires CKPT_MODE=latest." >&2
     exit 2
 fi
 
@@ -18,6 +32,16 @@ STOP_ARGS=()
 if [[ -n "$STOP_AT_STEP" ]]; then
     STOP_ARGS=(--stop_at_step "$STOP_AT_STEP")
 fi
+EVAL_OVERWRITE_ARGS=()
+if [[ "$EVAL_OVERWRITE" == "1" ]]; then
+    EVAL_OVERWRITE_ARGS=(--eval_overwrite)
+fi
+MODE_ARGS=()
+if [[ "$EVAL_ONLY" == "1" ]]; then
+    MODE_ARGS=(--test)
+fi
+TARGET_STEP="${STOP_AT_STEP:-30000}"
+printf -v TARGET_STEP_PADDED '%06d' "$TARGET_STEP"
 
 # Default order follows the staged execution plan: validate representative
 # scenes first, then complete the remaining four scenes. Pass scene names as
@@ -76,9 +100,14 @@ for SCENE in "${SCENES[@]}"; do
         --few_shot 3 \
         --seed 0 \
         --ckpt "$CKPT_MODE" \
+        "${MODE_ARGS[@]}" \
         --fp16 \
         --iters 30000 \
         "${STOP_ARGS[@]}" \
+        --eval_variants raw ema \
+        --eval_split test \
+        --eval_expected_step "$TARGET_STEP" \
+        "${EVAL_OVERWRITE_ARGS[@]}" \
         --amp_max_retries 4 \
         --lr 0.01 \
         --num_rays 4096 \
@@ -115,4 +144,11 @@ for SCENE in "${SCENES[@]}"; do
         --neurtv_lambda 1e-7 \
         --neurtv_num_samples 4096 \
         --neurtv_fd_epsilon 0.01
+
+    COMPLETE_FILE="$WORKSPACE/evaluation/step_${TARGET_STEP_PADDED}/COMPLETE"
+    if [[ ! -f "$COMPLETE_FILE" ]]; then
+        echo "Formal evaluation archive is incomplete: $COMPLETE_FILE" >&2
+        exit 1
+    fi
+    echo "Completed and archived: $SCENE -> $COMPLETE_FILE"
 done

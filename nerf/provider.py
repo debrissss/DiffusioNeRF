@@ -491,6 +491,13 @@ class NeRFDataset:
             'W': self.W,
             'rays_o': rays['rays_o'],
             'rays_d': rays['rays_d'],
+            # Preserve the transforms.json frame identity through the dataloader.
+            # Evaluation artifacts must use this ID rather than the loader-local
+            # ordinal so predictions can be matched to an explicit split.
+            'frame_id': torch.as_tensor(
+                [self.frame_ids[local_index] for local_index in index],
+                dtype=torch.long,
+            ),
         }
 
         if self.images is not None:

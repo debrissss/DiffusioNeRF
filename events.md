@@ -265,3 +265,356 @@ CKPT_MODE=latest ./run_DiffusioNeRF_LLFF_3v_NeurTV_Ray.sh fern
 
 该命令会从正式目录中最新的完整 checkpoint 恢复，并继续使用
 30,000-step 学习率计划。
+
+---
+
+## 2026-07-28：修复 LLFF Raw/EMA 评测语义与正式结果归档
+
+### 1. 事件背景
+
+`fern` 的 30,000-step 训练结束后，对最终评测路径进行审计时发现，已有
+日志指标、渲染图片和 checkpoint 之间没有完整且一致的来源标识：
+
+1. `Trainer.evaluate_one_epoch()` 在存在 EMA 时会临时将 EMA 参数复制到
+   模型，因此最终测试日志中的 PSNR、LPIPS 和 SSIM 来自 EMA。
+2. `Trainer.test()` 不切换 EMA，因此旧 `results/` 目录中的 RGB 和 depth
+   来自原始 Raw 参数。
+3. 最终日志指标和 `results/` 图片虽然使用同一 checkpoint 和测试帧，但
+   实际对应不同参数版本。
+4. `results/` 同时包含 `ngp_ep1000_*` 和 `ngp_ep10000_*`，即 3,000-step
+   与 30,000-step 结果混在同一目录。
+5. 最终测试调用 `evaluate()` 时仍将图片写入 `validation/`，验证集与测试
+   集结果没有目录级隔离。
+6. 最终指标只存在于 `log_ngp.txt`，没有结构化文件记录权重版本、测试帧、
+   checkpoint SHA256、global step、split、代码版本和逐图指标。
+7. 原 `--test` 路径构造 Trainer 时没有 EMA 对象，无法恢复完整 checkpoint
+   中的 EMA；同时可能错误尝试恢复只属于训练的 optimizer 和 scheduler。
+8. 完整 checkpoint 在最终测试前保存，因此 checkpoint 自身不包含最终
+   测试指标。
+
+另外，当前固定 split 中 `val_ids=[0]`，而 `test_ids=[0, 8, 16]`。验证帧
+0 与测试集重叠。验证不参与反向传播，所以固定 30,000-step 模型权重不受
+影响；但是按验证结果保存的 `checkpoints/ngp.pth` 存在测试集选择泄漏，
+不能作为正式论文 checkpoint。
+
+本次修复规定正式评测只使用固定训练步数的完整 checkpoint：
+
+```text
+checkpoints/ngp_ep10000.pth
+epoch       = 10000
+global_step = 30000
+```
+
+Raw 和 EMA 必须在同一 checkpoint、同一显式测试 split 和相同渲染配置下
+分别评测并完整归档。
+
+### 2. 本次代码修改
+
+#### `nerf/utils.py`
+
+- 为 Trainer 增加三种明确的 checkpoint 加载模式：
+  - `resume`：恢复模型、EMA、optimizer、scheduler、GradScaler、RNG 和
+    checkpoint 轮换状态，用于继续训练；
+  - `evaluation`：只恢复 Raw 模型、EMA、epoch、global step、stats 和
+    checkpoint 配置，不恢复或修改训练状态；
+  - `model`：仅加载模型参数，保留旧 model-only 用途。
+- 记录 `last_checkpoint_path`、checkpoint 原始配置和 EMA 是否确实来自
+  checkpoint。
+- 增加异常安全的 Raw/EMA 参数上下文：
+  - Raw 直接评测；
+  - EMA 评测前保存 Raw 参数并复制 EMA shadow 参数；
+  - 无论评测成功或异常都恢复 Raw；
+  - 每个 variant 结束后对全部模型参数和 buffer 重新计算 SHA256，确认
+    Raw 模型没有被 EMA 评测或渲染过程修改。
+- 新增正式双模型评测与归档入口 `evaluate_variants_archive()`：
+  - 强制使用带 GT 的单进程评测；
+  - 校验 checkpoint 路径、global step、split 文件和有序 frame IDs；
+  - 使用 `model.eval()`、`torch.no_grad()`、`perturb=False`、白色背景和
+    当前实验的 FP16 autocast；
+  - Raw 与 EMA 使用相同 loader 顺序和相同 GT；
+  - 分别计算逐图和场景平均 PSNR、LPIPS-Alex、SSIM；
+  - 指标从浮点预测直接计算，不从 8-bit PNG 反算；
+  - 保存预测 RGB、GT、float32 depth 和 depth preview；
+  - 文件名使用 transforms.json 原始 frame ID。
+- 正式归档通过 staging 目录构建，全部完成后使用 `os.replace()` 原子发布。
+- `COMPLETE` 最后生成，并包含其他 30 个归档文件的 SHA256 清单。
+- 已存在的归档只有同时满足以下条件才允许幂等复用：
+  - checkpoint SHA256 相同；
+  - global step、Raw/EMA variants 相同；
+  - split SHA256 和有序 frame IDs 相同；
+  - 评测代码 SHA256 相同；
+  - 所有归档文件存在且 SHA256 校验通过。
+- manifest 记录：
+  - checkpoint 路径、大小、SHA256、epoch、global step；
+  - Raw/EMA 模型状态 SHA256；
+  - EMA decay 和更新次数；
+  - dataset、split、transforms SHA256；
+  - 完整训练配置和评测配置；
+  - Python、PyTorch、CUDA、cuDNN、GPU；
+  - Git commit、dirty 状态和评测代码 SHA256。
+- 正式评测输出目录必须是当前 workspace 的子目录，避免用户参数将归档
+  写入或覆盖 workspace 根目录及外部路径。
+
+#### `nerf/provider.py`
+
+- dataloader batch 新增 `frame_id`。
+- `frame_id` 是 transforms.json 顺序下的原始 ID，而不是 split 内部的
+  局部序号。
+- 正式评测会校验实际 loader 顺序与 split 文件中的 test IDs 完全一致。
+
+#### `main_nerf.py`
+
+- 新增正式评测参数：
+  - `--eval_variants raw ema`
+  - `--eval_split test|val`
+  - `--eval_expected_step`
+  - `--eval_output_dir`
+  - `--eval_overwrite`
+- `--test` 改为 evaluation-only checkpoint 加载和正式归档，不再恢复
+  optimizer、scheduler、GradScaler 或 RNG。
+- 正常训练结束后从刚保存的完整 checkpoint 重新以 evaluation 模式加载，
+  保证指标对应磁盘中的确切 checkpoint 字节，而不是可变的内存状态。
+- 正式评测失败会直接返回非零状态，不再将失败降级为 Warning 后继续退出
+  为成功。
+- 不再把最终正式测试图片继续写入旧 `results/` 或 `validation/`。
+
+#### `run_DiffusioNeRF_LLFF_3v_NeurTV_Ray.sh`
+
+- 每个场景显式传入 Raw/EMA、test split 和目标 global step。
+- 新增 `EVAL_ONLY=1`，用于只读评测已有 checkpoint。
+- 新增 `EVAL_OVERWRITE=1`，重新评测时保留旧归档并原子替换权威目录。
+- `EVAL_ONLY=1` 禁止与 `CKPT_MODE=scratch` 组合。
+- 命令成功后必须存在对应 step 的 `COMPLETE`，否则 runner 返回失败。
+- 已完成训练在 `global_step=30000` 恢复时不会多训练一步；如果正式归档
+  完整且哈希匹配，则验证后跳过重复渲染。
+
+#### `scripts/aggregate_llff_evaluations.py`
+
+- 新增 LLFF 八场景正式汇总脚本。
+- 默认要求
+  `{fern, flower, fortress, horns, leaves, orchids, room, trex}` 全部存在
+  完整 Raw/EMA 归档。
+- 任一场景缺失时默认返回状态码 2，拒绝生成伪完整的论文汇总。
+- `--allow-partial` 只用于诊断当前完成进度。
+- 汇总前验证 `COMPLETE`、artifact SHA256、checkpoint step、Raw/EMA 标签
+  和 frame IDs。
+- 输出：
+  - `summary_long.csv`
+  - `summary.json`
+  - `summary.md`
+  - `COMPLETE`
+- 论文平均采用八场景无权宏平均，不使用按测试图数量加权的平均。
+- Raw/EMA 始终保存为两套完整结果；按指标择优时只允许在八场景宏平均后
+  为每个指标选择一个全局 variant，禁止先逐场景挑最好结果再平均。
+
+#### `EVALUATION_ARCHIVE.md`
+
+- 新增 Markdown 使用说明。
+- 记录训练/恢复、evaluation-only、overwrite、部分汇总和正式八场景汇总
+  命令。
+- 说明归档目录、完整性校验和论文指标选择规则。
+
+### 3. 正式归档结构
+
+Fern 权威结果位于：
+
+```text
+test_LLFF/test_fern/few_shot3/
+  test_DiffusioNeRF_NeurTV_Ray_30k_seed0/
+  evaluation/step_030000/
+```
+
+目录结构：
+
+```text
+step_030000/
+├── COMPLETE
+├── manifest.json
+├── comparison.json
+├── eval.log
+├── split_snapshot.json
+├── raw/
+│   ├── metrics.json
+│   └── frames/
+│       ├── frame_0000_rgb.png
+│       ├── frame_0000_gt.png
+│       ├── frame_0000_depth.npy
+│       ├── frame_0000_depth_preview.png
+│       └── ...
+└── ema/
+    ├── metrics.json
+    └── frames/
+```
+
+Fern 测试帧严格为：
+
+```text
+[0, 8, 16]
+```
+
+Raw 和 EMA 每套包含 3 张 RGB、3 张 GT、3 个 float32 depth 和 3 张 depth
+preview。
+
+### 4. Fern 30,000-step 正式结果
+
+| 模型参数 | PSNR ↑ | LPIPS-Alex ↓ | SSIM ↑ |
+|---|---:|---:|---:|
+| Raw | **22.241452** | **0.182661** | **0.715599** |
+| EMA | 22.239312 | 0.183012 | 0.715567 |
+
+精确差值 `Raw - EMA`：
+
+```text
+PSNR        = +0.002140204
+LPIPS-Alex  = -0.000351379
+SSIM        = +0.000031610
+```
+
+Fern 三项指标均由 Raw 略优，但差异非常小。按论文常见显示精度取整后几乎
+相同，因此归档保留两套完整结果和来源标签，不隐藏 EMA 结果。
+
+EMA 元数据：
+
+```text
+decay       = 0.95
+num_updates = 10000
+```
+
+此实现每个 epoch 更新一次 EMA，因此 10,000 epochs 对应 10,000 次 EMA
+更新。
+
+### 5. Checkpoint 完整性
+
+正式 checkpoint：
+
+```text
+test_LLFF/test_fern/few_shot3/
+  test_DiffusioNeRF_NeurTV_Ray_30k_seed0/
+  checkpoints/ngp_ep10000.pth
+```
+
+检查结果：
+
+```text
+epoch        = 10000
+global_step  = 30000
+size         = 260661737 bytes
+SHA256       = 1fe9f7e984909bef02487a87417260fb7c2e7e5bf4a62157cdd0d7180b0841f4
+mtime        = 2026-07-28 17:59:00.848082632 +0800
+```
+
+修改和全部评测验证结束后，checkpoint 的大小、SHA256 和 mtime 均未变化，
+说明正式评测没有重写或修改已有训练结果。
+
+### 6. 可靠性验证
+
+完成并通过以下验证：
+
+1. `python -m py_compile`：
+   - `main_nerf.py`
+   - `nerf/provider.py`
+   - `nerf/utils.py`
+   - `scripts/aggregate_llff_evaluations.py`
+2. `bash -n run_DiffusioNeRF_LLFF_3v_NeurTV_Ray.sh`。
+3. `git diff --check`。
+4. 使用 Fern 真实 30,000-step checkpoint 完成 Raw/EMA 端到端评测。
+5. Raw 和 EMA 指标精确复现此前独立诊断值。
+6. loader 和 manifest 均确认测试帧顺序为 `[0, 8, 16]`。
+7. 30 个归档 artifact 的 SHA256 全部通过。
+8. Raw 与 EMA 中对应 GT PNG 的 SHA256 完全相同。
+9. 所有 depth：
+   - shape 为 `(378, 504)`；
+   - dtype 为 `float32`；
+   - 全部数值有限。
+10. Raw/EMA 评测结束后模型状态 SHA256 恢复为评测前 Raw SHA256。
+11. 对同一完整归档再次运行：
+    - evaluation-only 正常加载；
+    - 完整性校验通过；
+    - 跳过 Raw/EMA 重复渲染；
+    - 返回状态码 0。
+12. 使用错误目标 `global_step=3000` 评测 30,000-step checkpoint：
+    - 抛出明确 `ValueError`；
+    - 返回状态码 1；
+    - 不产生错误 step 的正式归档。
+13. 八场景尚不完整时运行正式汇总：
+    - 明确列出其余 7 个缺失场景；
+    - 返回状态码 2；
+    - 不将 Fern 单场景结果伪装为八场景结果。
+14. 运行隔离的 scratch 3-step 全链路烟雾测试：
+    - 从随机初始化训练 1 epoch；
+    - 完成 3 次 optimizer 更新；
+    - 保存 `epoch=1 / global_step=3` 完整 checkpoint；
+    - 以 evaluation-only 模式重新加载；
+    - 完成 Raw/EMA 双评测；
+    - 生成 30 个带哈希的正式 artifact；
+    - 全部断言通过。
+15. 评测结束后 GPU 无残留训练或测试进程。
+
+scratch 烟雾测试使用独立系统临时目录；验证成功后已移入系统回收站，不影响
+正式 workspace，且仍可恢复。
+
+### 7. 当前汇总状态
+
+目前只有 `fern` 完成 NeurTV + virtual-ray、3-view、seed 0、30,000-step
+正式双模型归档。
+
+诊断性部分汇总位于：
+
+```text
+test_LLFF/aggregates/
+  llff_3v_neurtv_ray_seed0_step_030000/
+```
+
+该汇总明确标记其余 7 个场景为 incomplete。只有八场景全部完成后，才能
+不带 `--allow-partial` 生成正式论文汇总。
+
+多次 `EVAL_OVERWRITE=1` 可靠性验证保留了若干
+`step_030000.replaced.<timestamp>` 历史归档。权威结果始终只有：
+
+```text
+evaluation/step_030000/
+```
+
+### 8. 后续命令
+
+只读复核 Fern 正式归档：
+
+```bash
+EVAL_ONLY=1 CKPT_MODE=latest \
+  ./run_DiffusioNeRF_LLFF_3v_NeurTV_Ray.sh fern
+```
+
+重新生成 Fern 正式归档，并保留旧归档：
+
+```bash
+EVAL_ONLY=1 EVAL_OVERWRITE=1 CKPT_MODE=latest \
+  ./run_DiffusioNeRF_LLFF_3v_NeurTV_Ray.sh fern
+```
+
+从 checkpoint 恢复或启动其余七个场景：
+
+```bash
+CKPT_MODE=latest \
+  ./run_DiffusioNeRF_LLFF_3v_NeurTV_Ray.sh \
+  room orchids trex flower fortress horns leaves
+```
+
+八场景全部完成后生成正式汇总：
+
+```bash
+./scripts/aggregate_llff_evaluations.py
+```
+
+### 9. Git 与 provenance 状态
+
+本次修改在写入本事件记录时尚未提交 Git。Fern 当前 manifest 记录：
+
+```text
+base commit = 91cb7c0d4501d2ea4d70719cb3ca4bbf72b58b51
+git dirty   = true
+```
+
+manifest 同时记录了 `main_nerf.py`、`nerf/provider.py` 和 `nerf/utils.py`
+的精确 SHA256，因此当前未提交状态下的评测代码仍可审计。正式启动剩余
+七场景前，应先提交本次代码和文档修改，再使用 `EVAL_OVERWRITE=1` 重新
+生成一次 Fern 归档，使 manifest 记录干净的正式 commit。

@@ -31,6 +31,36 @@ if __name__ == '__main__':
     parser.add_argument('path', type=str)
     parser.add_argument('-O', action='store_true', help="equals --fp16 --cuda_ray --preload")
     parser.add_argument('--test', action='store_true', help="test mode")
+    parser.add_argument(
+        '--eval_variants',
+        nargs='+',
+        choices=['raw', 'ema'],
+        default=['raw', 'ema'],
+        help='model parameter variants to evaluate and archive',
+    )
+    parser.add_argument(
+        '--eval_split',
+        choices=['test', 'val'],
+        default='test',
+        help='explicit dataset split used by formal evaluation',
+    )
+    parser.add_argument(
+        '--eval_expected_step',
+        type=int,
+        default=None,
+        help='fail formal evaluation unless the loaded checkpoint has this global step',
+    )
+    parser.add_argument(
+        '--eval_output_dir',
+        type=str,
+        default=None,
+        help='optional archive directory inside --workspace',
+    )
+    parser.add_argument(
+        '--eval_overwrite',
+        action='store_true',
+        help='preserve and replace an existing formal evaluation archive',
+    )
     parser.add_argument('--num_testval_images', type=int, default=None, help="how many validation/test images to use")
     parser.add_argument('--workspace', type=str, default='workspace')
     parser.add_argument('--seed', type=int, default=0)
@@ -246,6 +276,8 @@ if __name__ == '__main__':
         parser.error('--neurtv_fd_epsilon must be in the open interval (0, 1)')
     if opt.iters <= 0:
         parser.error('--iters must be positive')
+    if opt.eval_expected_step is not None and opt.eval_expected_step <= 0:
+        parser.error('--eval_expected_step must be positive')
     if opt.amp_max_retries < 0:
         parser.error('--amp_max_retries must be non-negative')
     if opt.stop_at_step is not None and not 0 < opt.stop_at_step <= opt.iters:
@@ -323,36 +355,42 @@ if __name__ == '__main__':
 
 
     if opt.test:
-        
-        metrics = [PSNRMeter(), LPIPSMeter(device=device), SSIMMeter(device=device)]
-        trainer = Trainer('ngp', opt, model, device=device, workspace=opt.workspace, criterion=criterion, fp16=opt.fp16, metrics=metrics, use_checkpoint=opt.ckpt)
+        trainer = Trainer(
+            'ngp',
+            opt,
+            model,
+            device=device,
+            workspace=opt.workspace,
+            criterion=criterion,
+            ema_decay=0.95,
+            fp16=opt.fp16,
+            metrics=[],
+            use_checkpoint=opt.ckpt,
+            checkpoint_load_mode='evaluation',
+            use_tensorboardX=False,
+        )
 
         # 如果请求 GUI 且 GUI 可用，就打开 GUI 渲染
         if opt.gui and GUI_AVAILABLE:
             gui = NeRFGUI(opt, trainer)
             gui.render()
         else:
-            # headless: 直接执行测试逻辑
-            print("Headless mode: running test/eval.")
-
-            test_loader = NeRFDataset(opt, device=device, type='test', downscale=opt.downscale).dataloader()
-
-            try:
-                trainer.evaluate(test_loader, type='test')
-            except Exception as _e:
-                print("Warning: trainer.evaluate failed or not supported for this dataset. Reason:", _e)
-
-            # 运行 test（并保存视频）
-            try:
-                trainer.test(test_loader, write_video=False)
-            except Exception as _e:
-                print("Warning: trainer.test failed. Reason:", _e)
-
-            # 保存网格
-            try:
-                trainer.save_mesh(resolution=256, threshold=10)
-            except Exception as _e:
-                print("Warning: trainer.save_mesh failed or is not supported. Reason:", _e)
+            print("Headless mode: running formal evaluation archive.")
+            eval_loader = NeRFDataset(
+                opt,
+                device=device,
+                type=opt.eval_split,
+                downscale=opt.downscale,
+            ).dataloader()
+            trainer.evaluate_variants_archive(
+                eval_loader,
+                variants=opt.eval_variants,
+                checkpoint_path=trainer.last_checkpoint_path,
+                expected_step=opt.eval_expected_step,
+                output_dir=opt.eval_output_dir,
+                split_type=opt.eval_split,
+                overwrite=opt.eval_overwrite,
+            )
     
     else:
 
@@ -422,20 +460,29 @@ if __name__ == '__main__':
                 print("Error: trainer.train failed. Reason:", _e)
                 raise
 
-            # 训练结束后再测试并保存（尝试性运行并捕获异常）
-            try:
-                test_loader = NeRFDataset(opt, device=device, type='test', downscale=opt.downscale).dataloader()
-                try:
-                    trainer.evaluate(test_loader, type='test')
-                except Exception as _e:
-                    print("Warning: trainer.evaluate failed or not supported. Reason:", _e)
-                try:
-                    trainer.test(test_loader, write_video=False)
-                except Exception as _e:
-                    print("Warning: trainer.test failed. Reason:", _e)
-                try:
-                    trainer.save_mesh(resolution=256, threshold=10)
-                except Exception as _e:
-                    print("Warning: trainer.save_mesh failed. Reason:", _e)
-            except Exception as _e:
-                print("Warning: post-train evaluation/test/save failed. Reason:", _e)
+            # Formal final evaluation is required output. Reload the checkpoint
+            # in evaluation-only mode so archived metrics are tied to the exact
+            # bytes on disk rather than mutable in-memory training state.
+            if trainer.last_checkpoint_path is None:
+                raise RuntimeError(
+                    'Training finished without a full checkpoint to evaluate'
+                )
+            trainer.load_checkpoint(
+                trainer.last_checkpoint_path,
+                load_mode='evaluation',
+            )
+            eval_loader = NeRFDataset(
+                opt,
+                device=device,
+                type=opt.eval_split,
+                downscale=opt.downscale,
+            ).dataloader()
+            trainer.evaluate_variants_archive(
+                eval_loader,
+                variants=opt.eval_variants,
+                checkpoint_path=trainer.last_checkpoint_path,
+                expected_step=target_step,
+                output_dir=opt.eval_output_dir,
+                split_type=opt.eval_split,
+                overwrite=opt.eval_overwrite,
+            )

@@ -3,7 +3,13 @@ import glob
 import tqdm
 import math
 import imageio
+import copy
+import hashlib
+import json
+import platform
 import random
+import subprocess
+import sys
 import warnings
 import tensorboardX
 import raymarching
@@ -11,6 +17,7 @@ import numpy as np
 import pandas as pd
 
 import time
+from contextlib import contextmanager
 from datetime import datetime
 
 import cv2
@@ -359,6 +366,11 @@ class Trainer(object):
     _RESUME_CONFIG_IGNORED_KEYS = {
         'ckpt',
         'dataset_name',
+        'eval_expected_step',
+        'eval_output_dir',
+        'eval_overwrite',
+        'eval_split',
+        'eval_variants',
         'gui',
         'implementation_name',
         'stop_at_step',
@@ -388,6 +400,7 @@ class Trainer(object):
                  use_loss_as_metric=True, # use loss as the first metric
                  report_metric_at_train=False, # also report metrics at training
                  use_checkpoint="latest", # which ckpt to use at init time
+                 checkpoint_load_mode="resume", # resume, evaluation, or model
                  use_tensorboardX=True, # whether to use tensorboard for logging
                  scheduler_update_every_step=False, # whether to call scheduler.step() after every train step
                  awp_adversary=None, # whether to use adversarial weight perturbation
@@ -408,6 +421,12 @@ class Trainer(object):
         self.max_keep_ckpt = max_keep_ckpt
         self.eval_interval = eval_interval
         self.use_checkpoint = use_checkpoint
+        if checkpoint_load_mode not in {'resume', 'evaluation', 'model'}:
+            raise ValueError(
+                f'checkpoint_load_mode must be resume, evaluation, or model; '
+                f'got {checkpoint_load_mode!r}'
+            )
+        self.checkpoint_load_mode = checkpoint_load_mode
         self.use_tensorboardX = use_tensorboardX
         self.time_stamp = time.strftime("%Y-%m-%d_%H-%M-%S")
         self.scheduler_update_every_step = scheduler_update_every_step
@@ -451,6 +470,9 @@ class Trainer(object):
         self.epoch = 0
         self.global_step = 0
         self.local_step = 0
+        self.last_checkpoint_path = None
+        self.checkpoint_config = None
+        self.ema_checkpoint_loaded = False
         self.stats = {
             "loss": [],
             "valid_loss": [],
@@ -479,23 +501,31 @@ class Trainer(object):
 
         if self.workspace is not None:
             if self.use_checkpoint == "scratch":
+                if self.checkpoint_load_mode == 'evaluation':
+                    raise ValueError('evaluation mode requires a checkpoint; scratch is invalid')
                 self.log("[INFO] Training from scratch ...")
             elif self.use_checkpoint == "latest":
                 self.log("[INFO] Loading latest checkpoint ...")
-                self.load_checkpoint()
+                self.load_checkpoint(load_mode=self.checkpoint_load_mode)
             elif self.use_checkpoint == "latest_model":
                 self.log("[INFO] Loading latest checkpoint (model only)...")
-                self.load_checkpoint(model_only=True)
+                self.load_checkpoint(load_mode='model')
             elif self.use_checkpoint == "best":
                 if os.path.exists(self.best_path):
                     self.log("[INFO] Loading best checkpoint ...")
-                    self.load_checkpoint(self.best_path)
+                    self.load_checkpoint(
+                        self.best_path,
+                        load_mode=self.checkpoint_load_mode,
+                    )
                 else:
                     self.log(f"[INFO] {self.best_path} not found, loading latest ...")
-                    self.load_checkpoint()
+                    self.load_checkpoint(load_mode=self.checkpoint_load_mode)
             else: # path to ckpt
                 self.log(f"[INFO] Loading {self.use_checkpoint} ...")
-                self.load_checkpoint(self.use_checkpoint)
+                self.load_checkpoint(
+                    self.use_checkpoint,
+                    load_mode=self.checkpoint_load_mode,
+                )
         
         # clip loss prepare
         if opt.rand_pose >= 0: # =0 means only using CLIP loss, >0 means a hybrid mode.
@@ -534,6 +564,152 @@ class Trainer(object):
         finally:
             if os.path.exists(tmp_path):
                 os.remove(tmp_path)
+
+    @staticmethod
+    def _atomic_write_text(text, file_path):
+        """Atomically write a UTF-8 text file."""
+        os.makedirs(os.path.dirname(os.path.abspath(file_path)), exist_ok=True)
+        tmp_path = f'{file_path}.tmp.{os.getpid()}'
+        try:
+            with open(tmp_path, 'w', encoding='utf-8') as f:
+                f.write(text)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp_path, file_path)
+        finally:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+
+    @classmethod
+    def _atomic_json_dump(cls, value, file_path):
+        cls._atomic_write_text(
+            json.dumps(
+                cls._json_safe(value),
+                indent=2,
+                ensure_ascii=False,
+                sort_keys=True,
+            ) + '\n',
+            file_path,
+        )
+
+    @staticmethod
+    def _sha256_file(file_path):
+        digest = hashlib.sha256()
+        with open(file_path, 'rb') as f:
+            for chunk in iter(lambda: f.read(8 * 1024 * 1024), b''):
+                digest.update(chunk)
+        return digest.hexdigest()
+
+    @classmethod
+    def _json_safe(cls, value):
+        if value is None or isinstance(value, (str, int, float, bool)):
+            return value
+        if isinstance(value, np.generic):
+            return value.item()
+        if isinstance(value, torch.device):
+            return str(value)
+        if isinstance(value, torch.dtype):
+            return str(value)
+        if isinstance(value, dict):
+            return {
+                str(key): cls._json_safe(item)
+                for key, item in value.items()
+            }
+        if isinstance(value, (list, tuple)):
+            return [cls._json_safe(item) for item in value]
+        return repr(value)
+
+    def _model_state_sha256(self):
+        """Fingerprint all model parameters and buffers in a stable key order."""
+        digest = hashlib.sha256()
+        for name, tensor in sorted(self.model.state_dict().items()):
+            digest.update(name.encode('utf-8'))
+            if not torch.is_tensor(tensor):
+                digest.update(repr(tensor).encode('utf-8'))
+                continue
+            value = tensor.detach().cpu().contiguous()
+            digest.update(str(value.dtype).encode('ascii'))
+            digest.update(str(tuple(value.shape)).encode('ascii'))
+            digest.update(value.numpy().tobytes())
+        return digest.hexdigest()
+
+    @contextmanager
+    def _use_model_variant(self, variant):
+        """Temporarily expose either raw or EMA parameters, restoring raw on exit."""
+        if variant == 'raw':
+            yield
+            return
+        if variant != 'ema':
+            raise ValueError(f'Unsupported model variant: {variant!r}')
+        if self.ema is None:
+            raise RuntimeError('EMA evaluation requested, but no EMA state is loaded')
+
+        self.ema.store()
+        self.ema.copy_to()
+        try:
+            yield
+        finally:
+            self.ema.restore()
+
+    @staticmethod
+    def _git_provenance(repo_root):
+        def run_git(*args):
+            result = subprocess.run(
+                ['git', '-C', repo_root, *args],
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            # Leading spaces in `git status --porcelain` encode index/worktree
+            # state and must not be stripped.
+            return result.stdout.rstrip('\r\n')
+
+        try:
+            commit = run_git('rev-parse', 'HEAD').strip()
+            status = run_git('status', '--porcelain')
+            return {
+                'commit': commit,
+                'dirty': bool(status),
+                'status_porcelain': status.splitlines(),
+            }
+        except (OSError, subprocess.CalledProcessError) as exc:
+            return {
+                'commit': None,
+                'dirty': None,
+                'error': str(exc),
+            }
+
+    @staticmethod
+    def _evaluation_code_sha256(repo_root):
+        code_files = [
+            os.path.join(repo_root, 'main_nerf.py'),
+            os.path.join(repo_root, 'nerf', 'provider.py'),
+            os.path.join(repo_root, 'nerf', 'utils.py'),
+        ]
+        return {
+            os.path.relpath(path, repo_root): Trainer._sha256_file(path)
+            for path in code_files
+        }
+
+    def _environment_provenance(self):
+        cuda_device = None
+        if torch.cuda.is_available():
+            cuda_device = {
+                'name': torch.cuda.get_device_name(self.device),
+                'capability': list(torch.cuda.get_device_capability(self.device)),
+                'cuda_runtime': torch.version.cuda,
+                'cudnn': torch.backends.cudnn.version(),
+            }
+        return {
+            'python': sys.version,
+            'platform': platform.platform(),
+            'torch': torch.__version__,
+            'numpy': np.__version__,
+            'opencv': cv2.__version__,
+            'device': str(self.device),
+            'cuda': cuda_device,
+        }
 
     def _is_managed_checkpoint_path(self, file_path):
         """Only checkpoint files directly inside this Trainer's workspace are removable."""
@@ -1191,6 +1367,630 @@ class Trainer(object):
         self.evaluate_one_epoch(loader, name, type=type)
         self.use_tensorboardX = use_tensorboardX
 
+    @staticmethod
+    def _metric_to_float(value):
+        if torch.is_tensor(value):
+            return float(value.detach().cpu().item())
+        return float(value)
+
+    @staticmethod
+    def _write_png(file_path, rgb_or_gray):
+        os.makedirs(os.path.dirname(file_path), exist_ok=True)
+        success = cv2.imwrite(file_path, rgb_or_gray)
+        if not success:
+            raise IOError(f'OpenCV failed to write image: {file_path}')
+
+    def _evaluate_variant_to_directory(self, loader, variant, output_dir):
+        """Evaluate one parameter variant and archive per-frame float metrics."""
+        if self.world_size != 1 or self.local_rank != 0:
+            raise NotImplementedError(
+                'Formal evaluation archives currently require a single process'
+            )
+        if not loader.has_gt:
+            raise ValueError('Formal evaluation requires ground-truth images')
+
+        frames_dir = os.path.join(output_dir, 'frames')
+        os.makedirs(frames_dir, exist_ok=True)
+
+        meters = {
+            'psnr': PSNRMeter(),
+            'lpips_alex': LPIPSMeter(net='alex', device=self.device),
+            'ssim': SSIMMeter(device=self.device),
+        }
+        metric_sums = {name: 0.0 for name in meters}
+        per_frame = []
+        total_loss = 0.0
+        expected_frame_ids = list(loader._data.frame_ids)
+
+        self.log(
+            f'==> Formal {variant.upper()} evaluation: '
+            f'{len(expected_frame_ids)} frames -> {output_dir}'
+        )
+        pbar = tqdm.tqdm(
+            total=len(loader) * loader.batch_size,
+            bar_format=(
+                '{desc}: {percentage:3.0f}% {n_fmt}/{total_fmt} '
+                '[{elapsed}<{remaining}, {rate_fmt}]'
+            ),
+        )
+
+        with torch.no_grad():
+            for data in loader:
+                if 'frame_id' not in data:
+                    raise KeyError(
+                        'Evaluation batch has no frame_id; dataset provenance '
+                        'cannot be established'
+                    )
+                frame_ids = data['frame_id'].reshape(-1).tolist()
+                if len(frame_ids) != 1:
+                    raise ValueError(
+                        'Formal evaluation currently requires batch_size=1; '
+                        f'got frame IDs {frame_ids}'
+                    )
+                frame_id = int(frame_ids[0])
+
+                # eval_step converts images in-place for linear color space.
+                # Clone the tensor so the second model variant sees identical GT.
+                eval_data = dict(data)
+                eval_data['images'] = data['images'].clone()
+
+                with torch.cuda.amp.autocast(enabled=self.fp16):
+                    preds, preds_depth, truths, loss = self.eval_step(eval_data)
+
+                if not torch.isfinite(preds).all():
+                    raise FloatingPointError(
+                        f'Non-finite RGB prediction for {variant} frame {frame_id}'
+                    )
+                if not torch.isfinite(preds_depth).all():
+                    raise FloatingPointError(
+                        f'Non-finite depth prediction for {variant} frame {frame_id}'
+                    )
+
+                frame_metrics = {}
+                for metric_name, meter in meters.items():
+                    meter.clear()
+                    meter.update(preds, truths)
+                    metric_value = self._metric_to_float(meter.measure())
+                    if not math.isfinite(metric_value):
+                        raise FloatingPointError(
+                            f'Non-finite {metric_name} for '
+                            f'{variant} frame {frame_id}'
+                        )
+                    frame_metrics[metric_name] = metric_value
+                    metric_sums[metric_name] += metric_value
+
+                loss_value = float(loss.detach().cpu().item())
+                if not math.isfinite(loss_value):
+                    raise FloatingPointError(
+                        f'Non-finite MSE loss for {variant} frame {frame_id}'
+                    )
+                total_loss += loss_value
+
+                display_preds = preds
+                display_truths = truths
+                if self.opt.color_space == 'linear':
+                    display_preds = linear_to_srgb(display_preds)
+                    display_truths = linear_to_srgb(display_truths)
+
+                pred_rgb = np.clip(
+                    display_preds[0].detach().cpu().numpy(),
+                    0.0,
+                    1.0,
+                )
+                truth_rgb = np.clip(
+                    display_truths[0].detach().cpu().numpy(),
+                    0.0,
+                    1.0,
+                )
+                pred_rgb_u8 = np.rint(pred_rgb * 255.0).astype(np.uint8)
+                truth_rgb_u8 = np.rint(truth_rgb * 255.0).astype(np.uint8)
+                depth = preds_depth[0].detach().float().cpu().numpy()
+
+                prefix = f'frame_{frame_id:04d}'
+                rgb_name = f'{prefix}_rgb.png'
+                gt_name = f'{prefix}_gt.png'
+                depth_name = f'{prefix}_depth.npy'
+                depth_preview_name = f'{prefix}_depth_preview.png'
+
+                self._write_png(
+                    os.path.join(frames_dir, rgb_name),
+                    cv2.cvtColor(pred_rgb_u8, cv2.COLOR_RGB2BGR),
+                )
+                self._write_png(
+                    os.path.join(frames_dir, gt_name),
+                    cv2.cvtColor(truth_rgb_u8, cv2.COLOR_RGB2BGR),
+                )
+                np.save(os.path.join(frames_dir, depth_name), depth)
+
+                finite_depth = depth[np.isfinite(depth)]
+                depth_min = float(finite_depth.min())
+                depth_max = float(finite_depth.max())
+                if depth_max > depth_min:
+                    depth_preview = (
+                        (depth - depth_min) / (depth_max - depth_min) * 255.0
+                    )
+                else:
+                    depth_preview = np.zeros_like(depth)
+                depth_preview = np.clip(depth_preview, 0, 255).astype(np.uint8)
+                self._write_png(
+                    os.path.join(frames_dir, depth_preview_name),
+                    depth_preview,
+                )
+
+                per_frame.append({
+                    'frame_id': frame_id,
+                    'metrics': frame_metrics,
+                    'mse_loss': loss_value,
+                    'files': {
+                        'rgb': os.path.join('frames', rgb_name),
+                        'ground_truth': os.path.join('frames', gt_name),
+                        'depth_float32': os.path.join('frames', depth_name),
+                        'depth_preview': os.path.join(
+                            'frames',
+                            depth_preview_name,
+                        ),
+                    },
+                    'depth_range': {
+                        'min': depth_min,
+                        'max': depth_max,
+                    },
+                })
+
+                pbar.set_description(
+                    f'{variant} frame={frame_id} '
+                    f'PSNR={frame_metrics["psnr"]:.4f}'
+                )
+                pbar.update(loader.batch_size)
+
+        pbar.close()
+        seen_frame_ids = [item['frame_id'] for item in per_frame]
+        if seen_frame_ids != expected_frame_ids:
+            raise RuntimeError(
+                f'{variant} evaluation frame order mismatch: '
+                f'expected {expected_frame_ids}, got {seen_frame_ids}'
+            )
+        if not per_frame:
+            raise RuntimeError(f'{variant} evaluation produced no frames')
+
+        count = len(per_frame)
+        result = {
+            'schema_version': 1,
+            'variant': variant,
+            'frame_count': count,
+            'frame_ids': seen_frame_ids,
+            'mean': {
+                metric_name: metric_sum / count
+                for metric_name, metric_sum in metric_sums.items()
+            },
+            'mean_mse_loss': total_loss / count,
+            'per_frame': per_frame,
+            'metric_protocol': {
+                'psnr': 'per-image PSNR averaged across frames; higher is better',
+                'lpips_alex': (
+                    'LPIPS AlexNet with normalize=True, averaged across frames; '
+                    'lower is better'
+                ),
+                'ssim': (
+                    'torchmetrics structural_similarity_index_measure, '
+                    'averaged across frames; higher is better'
+                ),
+            },
+        }
+        self._atomic_json_dump(result, os.path.join(output_dir, 'metrics.json'))
+        self.log(
+            f'<== {variant.upper()}: '
+            f'PSNR={result["mean"]["psnr"]:.6f}, '
+            f'LPIPS={result["mean"]["lpips_alex"]:.6f}, '
+            f'SSIM={result["mean"]["ssim"]:.6f}'
+        )
+        return result
+
+    @staticmethod
+    def _compare_evaluation_variants(variant_results):
+        directions = {
+            'psnr': 'max',
+            'lpips_alex': 'min',
+            'ssim': 'max',
+        }
+        best_by_metric = {}
+        for metric_name, direction in directions.items():
+            values = {
+                variant: result['mean'][metric_name]
+                for variant, result in variant_results.items()
+            }
+            choose = max if direction == 'max' else min
+            winner = choose(values, key=values.get)
+            best_by_metric[metric_name] = {
+                'direction': direction,
+                'variant': winner,
+                'value': values[winner],
+                'all_values': values,
+            }
+
+        comparison = {
+            'schema_version': 1,
+            'variants': {
+                variant: result['mean']
+                for variant, result in variant_results.items()
+            },
+            'best_by_metric': best_by_metric,
+            'selection_policy': {
+                'scene_level': (
+                    'Diagnostic only: retain both variants and record the '
+                    'per-metric winner without hiding its source.'
+                ),
+                'paper_aggregate': (
+                    'After all eight LLFF scenes finish, compare the eight-scene '
+                    'macro mean and choose at most one global variant per metric; '
+                    'never choose independently per scene before averaging.'
+                ),
+            },
+        }
+        if 'raw' in variant_results and 'ema' in variant_results:
+            comparison['raw_minus_ema'] = {
+                metric_name: (
+                    variant_results['raw']['mean'][metric_name]
+                    - variant_results['ema']['mean'][metric_name]
+                )
+                for metric_name in directions
+            }
+        return comparison
+
+    def evaluate_variants_archive(
+        self,
+        loader,
+        variants=('raw', 'ema'),
+        checkpoint_path=None,
+        expected_step=None,
+        output_dir=None,
+        split_type='test',
+        overwrite=False,
+    ):
+        """Evaluate raw/EMA weights and atomically publish a provenance archive."""
+        variants = list(variants)
+        if not variants:
+            raise ValueError('At least one evaluation variant is required')
+        if len(variants) != len(set(variants)):
+            raise ValueError(f'Duplicate evaluation variants: {variants}')
+        unsupported = sorted(set(variants) - {'raw', 'ema'})
+        if unsupported:
+            raise ValueError(f'Unsupported evaluation variants: {unsupported}')
+        if split_type not in {'test', 'val'}:
+            raise ValueError(f'Unsupported formal evaluation split: {split_type}')
+
+        checkpoint_path = checkpoint_path or self.last_checkpoint_path
+        if checkpoint_path is None:
+            raise ValueError('Formal evaluation requires an explicit loaded checkpoint')
+        checkpoint_path = os.path.abspath(checkpoint_path)
+        if not os.path.isfile(checkpoint_path):
+            raise FileNotFoundError(
+                f'Formal evaluation checkpoint does not exist: {checkpoint_path}'
+            )
+        if self.last_checkpoint_path is not None:
+            if os.path.realpath(checkpoint_path) != os.path.realpath(
+                self.last_checkpoint_path
+            ):
+                raise ValueError(
+                    'The requested archive checkpoint is not the checkpoint '
+                    'currently loaded by the Trainer'
+                )
+        if expected_step is not None and self.global_step != expected_step:
+            raise ValueError(
+                f'Expected checkpoint global_step={expected_step}, '
+                f'but loaded global_step={self.global_step}'
+            )
+        if self.epoch < 0 or self.global_step < 0:
+            raise ValueError(
+                f'Invalid checkpoint metadata: epoch={self.epoch}, '
+                f'global_step={self.global_step}'
+            )
+        if (
+            'ema' in variants
+            and (self.ema is None or not self.ema_checkpoint_loaded)
+        ):
+            raise RuntimeError(
+                'EMA was requested but the loaded checkpoint has no usable EMA state'
+            )
+
+        checkpoint_sha256 = self._sha256_file(checkpoint_path)
+        split_file = getattr(self.opt, 'split_file', None)
+        split_sha256 = None
+        split_spec = None
+        if split_file is not None:
+            split_file = os.path.abspath(os.path.expanduser(split_file))
+            split_sha256 = self._sha256_file(split_file)
+            with open(split_file, 'r', encoding='utf-8') as f:
+                split_spec = json.load(f)
+
+        expected_frame_ids = list(loader._data.frame_ids)
+        if split_spec is not None:
+            declared_ids = split_spec.get(f'{split_type}_ids')
+            if declared_ids is not None and list(declared_ids) != expected_frame_ids:
+                raise ValueError(
+                    f'Loader frame IDs {expected_frame_ids} do not match '
+                    f'{split_type}_ids in {split_file}: {declared_ids}'
+                )
+
+        if output_dir is None:
+            output_dir = os.path.join(
+                self.workspace,
+                'evaluation',
+                f'step_{self.global_step:06d}',
+            )
+        output_dir = os.path.abspath(output_dir)
+        workspace_path = os.path.abspath(self.workspace)
+        if (
+            os.path.commonpath([workspace_path, output_dir]) != workspace_path
+            or output_dir == workspace_path
+        ):
+            raise ValueError(
+                f'Evaluation output must be a child of workspace '
+                f'{workspace_path}, got {output_dir}'
+            )
+        os.makedirs(os.path.dirname(output_dir), exist_ok=True)
+        repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        evaluation_code_sha256 = self._evaluation_code_sha256(repo_root)
+
+        complete_path = os.path.join(output_dir, 'COMPLETE')
+        if os.path.isfile(complete_path) and not overwrite:
+            manifest_path = os.path.join(output_dir, 'manifest.json')
+            comparison_path = os.path.join(output_dir, 'comparison.json')
+            with open(complete_path, 'r', encoding='utf-8') as f:
+                complete = json.load(f)
+            with open(manifest_path, 'r', encoding='utf-8') as f:
+                manifest = json.load(f)
+            if manifest['checkpoint']['sha256'] != checkpoint_sha256:
+                raise RuntimeError(
+                    f'Existing archive at {output_dir} belongs to a different '
+                    'checkpoint; use --eval_overwrite to preserve and replace it'
+                )
+            if manifest['evaluation']['variants'] != variants:
+                raise RuntimeError(
+                    f'Existing archive variants '
+                    f'{manifest["evaluation"]["variants"]} do not match {variants}; '
+                    'use --eval_overwrite'
+                )
+            if manifest['dataset']['frame_ids'] != expected_frame_ids:
+                raise RuntimeError(
+                    'Existing archive frame IDs do not match the current split; '
+                    'use --eval_overwrite'
+                )
+            if manifest['dataset'].get('split_sha256') != split_sha256:
+                raise RuntimeError(
+                    'Existing archive split hash does not match the current split; '
+                    'use --eval_overwrite'
+                )
+            if (
+                manifest.get('provenance', {}).get('code_sha256')
+                != evaluation_code_sha256
+            ):
+                raise RuntimeError(
+                    'Existing archive was produced by different evaluation code; '
+                    'use --eval_overwrite'
+                )
+            for variant in variants:
+                metrics_path = os.path.join(output_dir, variant, 'metrics.json')
+                if not os.path.isfile(metrics_path):
+                    raise RuntimeError(
+                        f'Archive has COMPLETE but is missing {metrics_path}'
+                    )
+            artifact_hashes = complete.get('artifact_sha256')
+            if not isinstance(artifact_hashes, dict) or not artifact_hashes:
+                raise RuntimeError(
+                    'Existing archive COMPLETE has no artifact hash inventory; '
+                    'use --eval_overwrite'
+                )
+            for relative_path, expected_sha256 in artifact_hashes.items():
+                artifact_path = os.path.abspath(
+                    os.path.join(output_dir, relative_path)
+                )
+                if os.path.commonpath([output_dir, artifact_path]) != output_dir:
+                    raise RuntimeError(
+                        f'Archive hash inventory escapes its root: {relative_path}'
+                    )
+                if not os.path.isfile(artifact_path):
+                    raise RuntimeError(
+                        f'Archive hash inventory references a missing file: '
+                        f'{relative_path}'
+                    )
+                actual_sha256 = self._sha256_file(artifact_path)
+                if actual_sha256 != expected_sha256:
+                    raise RuntimeError(
+                        f'Archive artifact hash mismatch for {relative_path}: '
+                        f'{expected_sha256} != {actual_sha256}'
+                    )
+            with open(comparison_path, 'r', encoding='utf-8') as f:
+                comparison = json.load(f)
+            self.log(
+                f'[INFO] Verified complete matching evaluation archive: {output_dir}'
+            )
+            return comparison
+
+        timestamp = datetime.utcnow().strftime('%Y%m%dT%H%M%SZ')
+        staging_dir = f'{output_dir}.staging.{os.getpid()}'
+        if os.path.exists(staging_dir):
+            raise FileExistsError(
+                f'Refusing to reuse an existing staging directory: {staging_dir}'
+            )
+        os.makedirs(staging_dir)
+
+        raw_fingerprint_before = self._model_state_sha256()
+        prior_training_mode = self.model.training
+        variant_results = {}
+        variant_fingerprints = {}
+        try:
+            for variant in variants:
+                variant_dir = os.path.join(staging_dir, variant)
+                os.makedirs(variant_dir)
+                with self._use_model_variant(variant):
+                    self.model.eval()
+                    variant_fingerprints[variant] = self._model_state_sha256()
+                    variant_results[variant] = self._evaluate_variant_to_directory(
+                        loader,
+                        variant,
+                        variant_dir,
+                    )
+
+                restored_fingerprint = self._model_state_sha256()
+                if restored_fingerprint != raw_fingerprint_before:
+                    raise RuntimeError(
+                        f'Raw model state changed after {variant} evaluation: '
+                        f'{raw_fingerprint_before} -> {restored_fingerprint}'
+                    )
+
+            comparison = self._compare_evaluation_variants(variant_results)
+            self._atomic_json_dump(
+                comparison,
+                os.path.join(staging_dir, 'comparison.json'),
+            )
+            if split_spec is not None:
+                self._atomic_json_dump(
+                    split_spec,
+                    os.path.join(staging_dir, 'split_snapshot.json'),
+                )
+
+            dataset_root = os.path.abspath(loader._data.root_path)
+            transforms_path = os.path.join(dataset_root, 'transforms.json')
+            ema_state = self.ema.state_dict() if self.ema is not None else {}
+            ema_num_updates = ema_state.get('num_updates')
+            if torch.is_tensor(ema_num_updates):
+                ema_num_updates = int(ema_num_updates.detach().cpu().item())
+            manifest = {
+                'schema_version': 1,
+                'created_utc': datetime.utcnow().isoformat(timespec='seconds') + 'Z',
+                'checkpoint': {
+                    'path': checkpoint_path,
+                    'sha256': checkpoint_sha256,
+                    'size_bytes': os.path.getsize(checkpoint_path),
+                    'epoch': self.epoch,
+                    'global_step': self.global_step,
+                    'model_raw_sha256': raw_fingerprint_before,
+                    'variant_model_sha256': variant_fingerprints,
+                },
+                'dataset': {
+                    'root': dataset_root,
+                    'scene': os.path.basename(os.path.normpath(dataset_root)),
+                    'split_type': split_type,
+                    'frame_ids': expected_frame_ids,
+                    'frame_count': len(expected_frame_ids),
+                    'split_file': split_file,
+                    'split_sha256': split_sha256,
+                    'transforms_sha256': (
+                        self._sha256_file(transforms_path)
+                        if os.path.isfile(transforms_path)
+                        else None
+                    ),
+                },
+                'evaluation': {
+                    'variants': variants,
+                    'fp16_autocast': self.fp16,
+                    'color_space': self.opt.color_space,
+                    'downscale': self.opt.downscale,
+                    'background_color': 1,
+                    'perturb': False,
+                    'ema': {
+                        'loaded_from_checkpoint': self.ema_checkpoint_loaded,
+                        'decay': (
+                            float(ema_state['decay'])
+                            if 'decay' in ema_state
+                            else None
+                        ),
+                        'num_updates': ema_num_updates,
+                    },
+                    'metric_means': {
+                        variant: result['mean']
+                        for variant, result in variant_results.items()
+                    },
+                },
+                'experiment_config': (
+                    self.checkpoint_config
+                    if self.checkpoint_config is not None
+                    else vars(self.opt)
+                ),
+                'evaluation_command': sys.argv,
+                'provenance': {
+                    'git': self._git_provenance(repo_root),
+                    'environment': self._environment_provenance(),
+                    'code_sha256': evaluation_code_sha256,
+                },
+            }
+            self._atomic_json_dump(
+                manifest,
+                os.path.join(staging_dir, 'manifest.json'),
+            )
+
+            log_lines = [
+                f'created_utc={manifest["created_utc"]}',
+                f'checkpoint={checkpoint_path}',
+                f'checkpoint_sha256={checkpoint_sha256}',
+                f'epoch={self.epoch}',
+                f'global_step={self.global_step}',
+                f'split={split_type}',
+                f'frame_ids={expected_frame_ids}',
+            ]
+            for variant in variants:
+                mean = variant_results[variant]['mean']
+                log_lines.append(
+                    f'{variant}: PSNR={mean["psnr"]:.9f}, '
+                    f'LPIPS_ALEX={mean["lpips_alex"]:.9f}, '
+                    f'SSIM={mean["ssim"]:.9f}'
+                )
+            self._atomic_write_text(
+                '\n'.join(log_lines) + '\n',
+                os.path.join(staging_dir, 'eval.log'),
+            )
+            artifact_sha256 = {}
+            for artifact_root, _, artifact_names in os.walk(staging_dir):
+                for artifact_name in sorted(artifact_names):
+                    artifact_path = os.path.join(artifact_root, artifact_name)
+                    relative_path = os.path.relpath(artifact_path, staging_dir)
+                    artifact_sha256[relative_path] = self._sha256_file(
+                        artifact_path
+                    )
+            self._atomic_json_dump(
+                {
+                    'status': 'complete',
+                    'checkpoint_sha256': checkpoint_sha256,
+                    'global_step': self.global_step,
+                    'variants': variants,
+                    'artifact_sha256': artifact_sha256,
+                },
+                os.path.join(staging_dir, 'COMPLETE'),
+            )
+
+            backup_dir = None
+            if os.path.exists(output_dir):
+                backup_dir = f'{output_dir}.replaced.{timestamp}'
+                if os.path.exists(backup_dir):
+                    raise FileExistsError(
+                        f'Evaluation backup path already exists: {backup_dir}'
+                    )
+                os.replace(output_dir, backup_dir)
+            try:
+                os.replace(staging_dir, output_dir)
+            except Exception:
+                if (
+                    backup_dir is not None
+                    and os.path.exists(backup_dir)
+                    and not os.path.exists(output_dir)
+                ):
+                    os.replace(backup_dir, output_dir)
+                raise
+
+            self.log(f'[INFO] Published formal evaluation archive: {output_dir}')
+            return comparison
+        except Exception:
+            if os.path.exists(staging_dir):
+                failed_dir = f'{output_dir}.failed.{timestamp}.{os.getpid()}'
+                os.replace(staging_dir, failed_dir)
+                self.log(
+                    f'[ERROR] Preserved failed evaluation staging directory: '
+                    f'{failed_dir}'
+                )
+            raise
+        finally:
+            self.model.train(prior_training_mode)
+
     def test(self, loader, save_path=None, name=None, write_video=True):
 
         if save_path is None:
@@ -1681,6 +2481,9 @@ class Trainer(object):
                     old_ckpt = self.stats["checkpoints"].pop(0)
 
             self._atomic_torch_save(state, file_path)
+            self.last_checkpoint_path = os.path.abspath(file_path)
+            self.checkpoint_config = copy.deepcopy(state['config'])
+            self.ema_checkpoint_loaded = self.ema is not None and 'ema' in state
             if old_ckpt is not None and old_ckpt != file_path:
                 if not self._is_managed_checkpoint_path(old_ckpt):
                     self.log(
@@ -1714,7 +2517,22 @@ class Trainer(object):
             else:
                 self.log(f"[WARN] no evaluated results found, skip saving best checkpoint.")
             
-    def load_checkpoint(self, checkpoint=None, model_only=False):
+    def load_checkpoint(
+        self,
+        checkpoint=None,
+        model_only=False,
+        load_mode=None,
+    ):
+        if load_mode is None:
+            load_mode = 'model' if model_only else 'resume'
+        elif model_only:
+            raise ValueError('Specify either model_only=True or load_mode, not both')
+        if load_mode not in {'resume', 'evaluation', 'model'}:
+            raise ValueError(
+                f'load_mode must be resume, evaluation, or model; '
+                f'got {load_mode!r}'
+            )
+
         if checkpoint is None:
             checkpoint_list = glob.glob(f'{self.ckpt_path}/{self.name}_ep*.pth')
             if checkpoint_list:
@@ -1724,17 +2542,20 @@ class Trainer(object):
                 self.log("[WARN] No checkpoint found, model randomly initialized.")
                 return
 
+        checkpoint = os.path.abspath(checkpoint)
         checkpoint_dict = torch.load(checkpoint, map_location=self.device)
         
         if 'model' not in checkpoint_dict:
             self.model.load_state_dict(checkpoint_dict)
+            self.last_checkpoint_path = checkpoint
             self.log("[INFO] loaded model.")
             return
 
         if 'config' in checkpoint_dict:
             self._validate_resume_config(checkpoint_dict['config'])
+            self.checkpoint_config = copy.deepcopy(checkpoint_dict['config'])
             self.log("[INFO] checkpoint configuration matches the current run.")
-        elif not model_only:
+        elif load_mode != 'model':
             self.log("[WARN] Checkpoint has no saved configuration; resume compatibility cannot be verified.")
 
         missing_keys, unexpected_keys = self.model.load_state_dict(checkpoint_dict['model'], strict=False)
@@ -1744,19 +2565,55 @@ class Trainer(object):
         if len(unexpected_keys) > 0:
             self.log(f"[WARN] unexpected keys: {unexpected_keys}")   
 
-        if self.ema is not None and 'ema' in checkpoint_dict:
-            self.ema.load_state_dict(checkpoint_dict['ema'])
+        self.ema_checkpoint_loaded = False
+        if 'ema' in checkpoint_dict:
+            if self.ema is None:
+                self.log(
+                    '[WARN] Checkpoint contains EMA state, but this Trainer was '
+                    'constructed without ema_decay; EMA was not loaded.'
+                )
+            else:
+                self.ema.load_state_dict(checkpoint_dict['ema'])
+                self.ema_checkpoint_loaded = True
+                self.log("[INFO] loaded EMA state.")
+        elif self.ema is not None:
+            self.log("[WARN] Checkpoint has no EMA state.")
 
         if self.model.cuda_ray:
             if 'mean_count' in checkpoint_dict:
                 self.model.mean_count = checkpoint_dict['mean_count']
             if 'mean_density' in checkpoint_dict:
                 self.model.mean_density = checkpoint_dict['mean_density']
-        
-        if model_only:
+
+        self.last_checkpoint_path = checkpoint
+        if load_mode == 'model':
             return
 
-        self.stats = checkpoint_dict['stats']
+        required_metadata = ['stats', 'epoch', 'global_step']
+        missing_metadata = [
+            key for key in required_metadata if key not in checkpoint_dict
+        ]
+        if missing_metadata:
+            raise KeyError(
+                f'Checkpoint {checkpoint} is missing metadata required for '
+                f'{load_mode} loading: {missing_metadata}'
+            )
+
+        self.stats = copy.deepcopy(checkpoint_dict['stats'])
+        self.epoch = int(checkpoint_dict['epoch'])
+        self.global_step = int(checkpoint_dict['global_step'])
+        self.log(
+            f"[INFO] load at epoch {self.epoch}, "
+            f"global step {self.global_step} ({load_mode})"
+        )
+
+        if load_mode == 'evaluation':
+            self.log(
+                '[INFO] Evaluation-only load skipped optimizer, scheduler, '
+                'GradScaler, RNG, and checkpoint-rotation restoration.'
+            )
+            return
+
         checkpoint_history = self.stats.get('checkpoints', [])
         managed_history = [
             file_path for file_path in checkpoint_history
@@ -1776,9 +2633,6 @@ class Trainer(object):
                 'external checkpoint paths will never be removed.'
             )
         self.stats['checkpoints'] = managed_history
-        self.epoch = checkpoint_dict['epoch']
-        self.global_step = checkpoint_dict['global_step']
-        self.log(f"[INFO] load at epoch {self.epoch}, global step {self.global_step}")
         
         if self.optimizer and 'optimizer' in checkpoint_dict:
             try:
