@@ -25,6 +25,9 @@
 # table.py 生成的实验指标表
 /tables/
 
+# 本地论文文档
+/把稀疏视点下神经辐射场重建的优化方法_提纯版.pdf
+
 # PyTorch 模型权重
 *.pth
 *.pth.tar
