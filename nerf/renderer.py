@@ -207,16 +207,6 @@ class NeRFRenderer(nn.Module):
         #plot_pointcloud(xyzs.reshape(-1, 3).detach().cpu().numpy())
 
         # query SDF and RGB
-        # density_outputs = self.density(xyzs.reshape(-1, 3), perturb_feat = adv_perturb.get('feat_c', None), current_iter=current_iter, total_iter=total_iter, start_ptr=start_ptr)
-
-        ##########neurtv
-        # 在训练时、并且启用 neurtv 
-        use_neurtv = kwargs.get('neurtv', False) and self.training
-
-        # 让 xyzs 成为子节点，便于对 sigma 求对 xyz 的梯度
-        if use_neurtv:
-            xyzs = xyzs.detach().requires_grad_(True)
-
         density_outputs = self.density(
             xyzs.reshape(-1, 3),
             perturb_feat=adv_perturb.get('feat_c', None),
@@ -329,31 +319,6 @@ class NeRFRenderer(nn.Module):
         image = image.view(*prefix, 3)
         depth = depth.view(*prefix)
 
-        if use_neurtv:
-            sigma = density_outputs['sigma']  # [N, T, 1]
-            sigma_scalar = sigma.sum()
-
-            grad_xyz = torch.autograd.grad(
-                outputs=sigma_scalar,
-                inputs=xyzs,
-                create_graph=True,
-                retain_graph=True,
-                only_inputs=True
-            )[0]  # [N, T, 3]
-
-            neurtv = grad_xyz.abs().sum(dim=-1)  # [N, T]
-
-            if kwargs.get('neurtv_sigma_thresh', 0.0) > 0:
-                mask = (sigma.squeeze(-1).detach() > kwargs['neurtv_sigma_thresh']).float()
-                neurtv = neurtv * mask
-
-            if kwargs.get('neurtv_weighted', True):
-                neurtv = neurtv * weights.detach()
-
-            result['neurtv_loss'] = neurtv.mean()
-            result['xyzs'] = xyzs
-            result['sigma'] = sigma
-
         result = {'depth': depth, 'image': image, 'weights_sum': weights_sum,}
         if return_intermediates:
             result['weights'] = weights
@@ -400,11 +365,6 @@ class NeRFRenderer(nn.Module):
             self.local_step += 1
 
             xyzs, dirs, deltas, rays = raymarching.march_rays_train(rays_o, rays_d, self.bound, self.density_bitfield, self.cascade, self.grid_size, nears, fars, counter, self.mean_count, perturb, 128, force_all_rays, dt_gamma, max_steps)
-            use_neurtv = kwargs.get('neurtv', False) and self.training
-
-            if use_neurtv:
-                xyzs = xyzs.detach().requires_grad_(True)
-
             sigmas, rgbs = self(xyzs, dirs)
             sigmas = self.density_scale * sigmas
 
@@ -435,31 +395,6 @@ class NeRFRenderer(nn.Module):
             
             results['weights_sum'] = weights_sum
             
-            if use_neurtv:
-                # sigmas 可能是 [N, T]，也可能是 [K, N, T]
-                sigma_scalar = sigmas.sum()
-
-                grad_xyz = torch.autograd.grad(
-                    outputs=sigma_scalar,
-                    inputs=xyzs,
-                    create_graph=True,
-                    retain_graph=True,
-                    only_inputs=True
-                )[0]
-
-                neurtv = grad_xyz.abs().sum(dim=-1)
-
-                if kwargs.get('neurtv_sigma_thresh', 0.0) > 0:
-                    mask = (sigmas.detach() > kwargs['neurtv_sigma_thresh']).float()
-                    neurtv = neurtv * mask
-
-                if kwargs.get('neurtv_weighted', True):
-                    neurtv = neurtv * weights.detach()
-
-                result['neurtv_loss'] = neurtv.mean()
-                result['xyzs'] = xyzs
-                result['sigma'] = sigmas            
-
         else:
            
             # allocate outputs 

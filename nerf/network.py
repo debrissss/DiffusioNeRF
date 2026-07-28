@@ -312,6 +312,7 @@ class nllMLP(torch.nn.Module):
 
     def normalization(self, w, softplus_ci):
         absrowsum = torch.sum(torch.abs(w), dim=1)
+        absrowsum = absrowsum.clamp_min(torch.finfo(w.dtype).eps)
         # scale = torch.minimum(torch.tensor(1.0), softplus_ci/absrowsum)
         # this is faster than the previous line since we don't constantly recreate a torch.tensor(1.0)
         scale = softplus_ci / absrowsum
@@ -419,4 +420,3 @@ def apply_weight_init_fn(m, fn, negative_slope=1.0):
         # m.weights_initialized=True
         for module in m.children():
             apply_weight_init_fn(module, fn, negative_slope)
-

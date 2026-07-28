@@ -129,11 +129,13 @@ main_nerf.py
 | Foreground Loss | `--loss_fg`、`--fg_lambda` | 促进射线累积权重接近 1 |
 | Ray Entropy | `--entropy` | 降低射线采样分布熵 |
 | Information Gain/KL | `--smoothing` | 约束邻近射线分布一致性 |
-| NeurTV | `--neurtv`、`--neurtv_lambda` | 对密度场空间梯度施加 TV 约束 |
+| NeurTV | `--neurtv`、`--neurtv_lambda`、`--neurtv_fd_epsilon` | 通过中心有限差分近似密度场空间梯度并施加 TV 约束 |
 | 对抗训练 | `--adv ...` | 支持随机/PGD 输入扰动与 AWP 权重扰动 |
-| 虚拟射线增强 | 当前无正式 CLI 开关 | 构造穿过估计表面点的虚拟射线，用 JSD 筛选并约束深度 |
+| 虚拟射线增强 | `--virtual_ray`、`--virtual_ray_k`、`--virtual_ray_jsd_th` | 构造穿过估计表面点的虚拟射线，用 JSD 筛选并约束深度 |
 
-当前 LLFF 脚本启用了 Diffusion 几何正则、Distortion、Foreground、深度 Patch 平滑、NLL、颜色频率正则和近像素 KL 平滑。
+当前 LLFF 3-view NeurTV + 虚拟射线脚本还启用了 Diffusion 几何正则、
+Distortion、Foreground、深度 Patch 平滑、NLL、颜色频率正则和近像素
+KL 平滑。
 
 ## 7. 环境与运行方式
 
@@ -169,7 +171,41 @@ NO_GUI=1 bash run_DiffusioNeRF_LLFF.sh
 
 如需换场景或视图数，需要修改脚本中的循环索引，而不是只修改数组。
 
-### 7.3 直接训练
+### 7.3 LLFF 3-view NeurTV + 虚拟射线正式实验
+
+```bash
+./run_DiffusioNeRF_LLFF_3v_NeurTV_Ray.sh
+```
+
+该脚本使用 `splits/llff_3v/` 中固定的标准切分、30,000 个优化步和
+seed 0；默认以 `latest` 模式自动恢复。也可以只运行指定场景：
+
+```bash
+./run_DiffusioNeRF_LLFF_3v_NeurTV_Ray.sh fern room
+```
+
+首次运行且只训练到 step 3000（学习率仍按 30,000 step 衰减）：
+
+```bash
+CKPT_MODE=scratch STOP_AT_STEP=3000 \
+  ./run_DiffusioNeRF_LLFF_3v_NeurTV_Ray.sh fern
+```
+
+从该 checkpoint 继续到完整 30,000 step：
+
+```bash
+CKPT_MODE=latest ./run_DiffusioNeRF_LLFF_3v_NeurTV_Ray.sh fern
+```
+
+完整 checkpoint 原子写入模型、优化器、学习率调度器、AMP scaler、
+EMA、global step、实验配置及 Python/NumPy/PyTorch/CUDA RNG 状态。
+恢复时若训练配置发生变化，程序会拒绝继续，防止混跑。
+checkpoint 轮换只允许删除当前 workspace 的文件，使用外部 checkpoint
+做评估或诊断不会影响来源文件。FP16 梯度溢出时，默认最多降低四次
+GradScaler scale 并重放同一随机批次；`--detect_anomaly` 仅用于显式调试，
+正式训练默认关闭。
+
+### 7.4 直接训练
 
 ```bash
 NO_GUI=1 python main_nerf.py data/nerf_llff_data/fern \
@@ -187,7 +223,7 @@ NO_GUI=1 python main_nerf.py data/nerf_llff_data/fern \
 --ckpt scratch
 ```
 
-### 7.4 测试已有模型
+### 7.5 测试已有模型
 
 ```bash
 NO_GUI=1 python main_nerf.py data/nerf_llff_data/fern \
@@ -225,44 +261,47 @@ workspace/
    - `requirements.txt` 与 `environment.yml` 的依赖集合并不完全一致，建议以实际可运行环境生成锁定版本；
    - README 提到的 `run_DiffusioNeRF_NS.sh`、`run_DTU.sh` 和 `scripts/llff2nerf.py` 当前目录不存在。
 
-2. **虚拟射线增强默认强制开启**
-   - `Trainer.train_step()` 使用 `getattr(self.opt, 'virtual_ray', True)`；
-   - `main_nerf.py` 未声明 `--virtual_ray`、`--virtual_ray_k`、`--virtual_ray_jsd_th`、`--virtual_ray_depth_lambda`；
-   - 因此训练到第 1000 步后默认启用，且无法通过现有 CLI 正常关闭；
-   - 该流程会额外执行多次渲染，显著增加显存和计算量。
+2. **虚拟射线增强计算成本较高**
+   - 已提供 `--virtual_ray` / `--no_virtual_ray`、`--virtual_ray_start_iter`、`--virtual_ray_k`、`--virtual_ray_jsd_th` 和 `--virtual_ray_depth_lambda`；
+   - 为兼容历史运行，虚拟射线默认仍开启并从第 1000 步开始；
+   - 该流程会额外执行多次渲染，显著增加显存和计算量；消融实验应显式传入开关与全部参数。
 
-3. **NeurTV 调用可能报错**
-   - `compute_neurtv_loss` 定义在 `Trainer` 类中，但训练时以未限定名称 `compute_neurtv_loss(...)` 调用；
-   - 开启 `--neurtv` 并到达生效步数后，可能触发 `NameError`；
-   - `--neurtv_num_samples` 也未在主参数解析器中声明。
+3. **NeurTV 会增加密度场查询开销**
+   - 类内调用已修复为 `self.compute_neurtv_loss(...)`；
+   - `--neurtv_num_samples` 已加入主参数解析器，默认值为 4096；
+   - 当前实现用三个坐标轴的中心有限差分近似密度梯度，避免 Hash Grid CUDA 编码器不支持的二阶梯度；
+   - `--neurtv_fd_epsilon` 是相对于场景 `bound` 的差分步长比例，正式脚本显式设为 `0.01`；
+   - 每次 NeurTV 计算需要额外执行六次密度查询，开启后仍应监控耗时和显存。
 
-4. **部分参数类型不严谨**
-   - `--smoothing_step_size` 声明为 `type=int`，但默认值写成字符串 `'5000'`；
-   - 默认运行脚本使用 `parse_known_args()`，未知或拼错的参数会被静默忽略，容易造成“参数写了但未生效”。
+4. **参数解析已改为严格模式**
+   - `--smoothing_step_size` 的默认值已修正为整数；
+   - 主脚本使用 `parse_args()`，未知或拼错的参数会立即报错。
 
-5. **数据集切分和图像处理含硬编码**
-   - COLMAP 数据固定按前 5 帧划分验证/测试；
+5. **数据集切分和图像处理仍含旧兼容分支**
+   - `--split_file` 可按 `transforms.json` 帧序号显式指定 train/val/test，并校验数量、范围、重复、交集和缺失图像；
+   - 未提供 `--split_file` 时，COLMAP 数据仍沿用旧的硬编码切分；
    - 灰度图分支固定遍历 `1536 × 2048`，对其他分辨率可能越界或处理错误；
-   - 自定义数据接入前需要清理这些数据集特例。
+   - LLFF 3-view 正式实验应使用 `splits/llff_3v/` 下的固定清单。
 
 6. **历史副本和产物占用较大**
    - 当前目录约有 12 GB 以上数据和实验结果；
    - 多个 `-原`、`Copy1`、Notebook checkpoint 与大量变体 workspace 容易混淆当前有效实现；
-   - 当前目录没有可识别的 `.git` 元数据，无法通过 Git 追踪这些变体的来源和差异。
+   - 应通过 Git 提交和独立 workspace 名称追踪有效实现与实验来源。
 
-7. **测试覆盖偏底层**
+7. **自动化测试覆盖仍偏底层**
    - `testing/` 主要验证 CUDA 扩展；
    - 暂未看到对数据加载、完整训练 step、正则化组合和端到端推理的自动化测试；
-   - 本次仅执行了 Python 语法编译检查，核心 Python 文件可以通过 `py_compile`，未进行 GPU 训练验证。
+   - LLFF fern 3-view 的 NeurTV + 虚拟射线配置已经过真实 GPU 训练验证：按 30,000-step 学习率计划运行并在 global step 3000 停止，随后成功完成验证、标准测试渲染和网格导出；
+   - 训练曾从 epoch 999 / global step 2997 的完整 checkpoint 恢复，优化器、调度器、AMP scaler 与 RNG 状态均成功加载。
 
 ## 10. 建议的后续整理顺序
 
 1. 修复 `requirements.txt`，统一 Conda/Pip 依赖和已验证的 CUDA/PyTorch 版本。
-2. 为虚拟射线与 NeurTV 补齐 CLI 参数，修正 NeurTV 调用，并将实验功能默认关闭。
-3. 将 LLFF/DTU/Blender 的切分策略从 `provider.py` 硬编码中抽离为配置。
+2. 将虚拟射线的兼容默认值改为关闭，并让所有正式实验脚本继续显式声明开关。
+3. 将 DTU/Blender 的切分策略也从 `provider.py` 硬编码中抽离为配置；LLFF 已支持显式 JSON split。
 4. 将主脚本拆分为参数配置、训练、评估三个模块，避免 `utils.py` 继续膨胀。
 5. 删除或迁移历史副本、`.ipynb_checkpoints` 和重复实验目录，并恢复 Git 版本管理。
-6. 增加最小 smoke test：加载一个场景、运行一个 train step、保存并重新加载 checkpoint、渲染一张测试图。
+6. 将已人工验证的数据加载、训练 step、checkpoint 恢复和测试渲染流程固化为自动化 smoke test。
 7. 为每组实验保存完整命令、代码版本、随机种子和指标汇总，提升结果可复现性。
 
 ## 11. 快速接手索引

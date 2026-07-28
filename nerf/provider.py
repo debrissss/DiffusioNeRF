@@ -55,6 +55,97 @@ def visualize_poses(poses, size=0.1):
     trimesh.Scene(objects).show()
 
 
+def _validate_split_ids(split_spec, key, frame_count, required=True):
+    if key not in split_spec:
+        if required:
+            raise ValueError(f'[NeRFDataset] Split file is missing required key: {key}')
+        return None
+
+    ids = split_spec[key]
+    if not isinstance(ids, list):
+        raise ValueError(f'[NeRFDataset] {key} must be a JSON list')
+    if not ids:
+        raise ValueError(f'[NeRFDataset] {key} must not be empty')
+    if any(isinstance(frame_id, bool) or not isinstance(frame_id, int) for frame_id in ids):
+        raise ValueError(f'[NeRFDataset] {key} must contain integer frame IDs only')
+    if len(ids) != len(set(ids)):
+        raise ValueError(f'[NeRFDataset] {key} contains duplicate frame IDs: {ids}')
+
+    invalid_ids = [frame_id for frame_id in ids if frame_id < 0 or frame_id >= frame_count]
+    if invalid_ids:
+        raise ValueError(
+            f'[NeRFDataset] {key} contains out-of-range IDs {invalid_ids}; '
+            f'transforms.json contains {frame_count} frames'
+        )
+
+    return ids
+
+
+def load_explicit_split(split_file, root_path, frame_count, split_type):
+    """Load and validate frame IDs defined against transforms.json frame order."""
+    split_path = os.path.abspath(os.path.expanduser(split_file))
+    if not os.path.isfile(split_path):
+        raise FileNotFoundError(f'[NeRFDataset] Split file does not exist: {split_path}')
+
+    with open(split_path, 'r', encoding='utf-8') as f:
+        split_spec = json.load(f)
+
+    if not isinstance(split_spec, dict):
+        raise ValueError(f'[NeRFDataset] Split file must contain a JSON object: {split_path}')
+
+    declared_frame_count = split_spec.get('frame_count')
+    if declared_frame_count is not None:
+        if isinstance(declared_frame_count, bool) or not isinstance(declared_frame_count, int):
+            raise ValueError('[NeRFDataset] frame_count in the split file must be an integer')
+        if declared_frame_count != frame_count:
+            raise ValueError(
+                f'[NeRFDataset] Split frame_count={declared_frame_count}, '
+                f'but transforms.json contains {frame_count} frames'
+            )
+
+    declared_scene = split_spec.get('scene')
+    actual_scene = os.path.basename(os.path.normpath(root_path))
+    if declared_scene is not None and declared_scene != actual_scene:
+        raise ValueError(
+            f'[NeRFDataset] Split scene={declared_scene!r}, '
+            f'but dataset path resolves to scene={actual_scene!r}'
+        )
+
+    train_ids = _validate_split_ids(split_spec, 'train_ids', frame_count)
+    test_ids = _validate_split_ids(split_spec, 'test_ids', frame_count)
+    val_ids = _validate_split_ids(split_spec, 'val_ids', frame_count, required=False)
+    if val_ids is None:
+        val_ids = list(test_ids)
+
+    train_test_overlap = sorted(set(train_ids).intersection(test_ids))
+    if train_test_overlap:
+        raise ValueError(
+            f'[NeRFDataset] train_ids and test_ids overlap: {train_test_overlap}'
+        )
+    train_val_overlap = sorted(set(train_ids).intersection(val_ids))
+    if train_val_overlap:
+        raise ValueError(
+            f'[NeRFDataset] train_ids and val_ids overlap: {train_val_overlap}'
+        )
+
+    if split_type == 'train':
+        frame_ids = train_ids
+    elif split_type == 'val':
+        frame_ids = val_ids
+    elif split_type == 'test':
+        frame_ids = test_ids
+    elif split_type == 'trainval':
+        frame_ids = train_ids + [
+            frame_id for frame_id in val_ids if frame_id not in set(train_ids)
+        ]
+    elif split_type == 'all':
+        frame_ids = list(range(frame_count))
+    else:
+        raise ValueError(f'[NeRFDataset] Unsupported split type: {split_type}')
+
+    return split_path, list(frame_ids)
+
+
 def rand_poses(size, device, radius=1, theta_range=[np.pi/3, 2*np.pi/3], phi_range=[0, 2*np.pi]):
     ''' generate random poses from an orbit camera
     Args:
@@ -164,6 +255,8 @@ class NeRFDataset:
         
         # read images
         frames = transform["frames"]
+        frame_ids = list(range(len(frames)))
+        self.split_file = getattr(self.opt, 'split_file', None)
         #frames = sorted(frames, key=lambda d: d['file_path']) # why do I sort...
         
         # for colmap, manually interpolate a test set.
@@ -187,34 +280,71 @@ class NeRFDataset:
                 self.poses.append(pose)
         """
 
-        #else:
-        # for colmap, manually split a valid set (the first frame). Set for fox dataset
-        if self.mode == 'colmap':
+        if self.split_file is not None:
+            if self.mode != 'colmap':
+                raise ValueError(
+                    '[NeRFDataset] --split_file is supported for transforms.json datasets only'
+                )
+            if self.opt.num_testval_images is not None:
+                raise ValueError(
+                    '[NeRFDataset] --num_testval_images cannot be combined with --split_file '
+                    'because it would alter the explicit split'
+                )
+            self.split_file, frame_ids = load_explicit_split(
+                self.split_file,
+                root_path=self.root_path,
+                frame_count=len(frames),
+                split_type=type,
+            )
+            frames = [frames[frame_id] for frame_id in frame_ids]
+            print(
+                f'[INFO] Loaded explicit {type} split from {self.split_file}: '
+                f'frame_ids={frame_ids}'
+            )
+        # For COLMAP datasets without an explicit split, preserve the legacy split.
+        elif self.mode == 'colmap':
             if type == 'train':
+                frame_ids = frame_ids[5:]
                 frames = frames[5:]#frames[0:14]
             elif type == 'val':
+                frame_ids = frame_ids[:1]
                 frames = frames[:1]#frames[14:16]
             # else 'all' or 'trainval' : use all frames
             elif type == 'test':
+                frame_ids = frame_ids[1:5]
                 frames = frames[1:5]
 
 
         self.poses = []
         self.images = []
+        loaded_frame_ids = []
         check_gray = False
-        for f in tqdm.tqdm(frames, desc=f'Loading {type} data'):
+        frame_iter = zip(frame_ids, frames)
+        for frame_id, f in tqdm.tqdm(
+            frame_iter,
+            total=len(frames),
+            desc=f'Loading {type} data'
+        ):
             f_path = os.path.join(self.root_path, f['file_path'])
             if self.mode == 'blender' and '.' not in os.path.basename(f_path):
                 f_path += '.png' # so silly...
 
             # there are non-exist paths in fox...
             if not os.path.exists(f_path):
+                if self.split_file is not None:
+                    raise FileNotFoundError(
+                        f'[NeRFDataset] Split frame {frame_id} does not exist: {f_path}'
+                    )
                 continue
 
             pose = np.array(f['transform_matrix'], dtype=np.float32) # [4, 4]
             pose = nerf_matrix_to_ngp(pose, scale=self.scale, offset=self.offset)
 
             image = cv2.imread(f_path, cv2.IMREAD_UNCHANGED) # [H, W, 3] o [H, W, 4]
+            if image is None:
+                raise RuntimeError(
+                    f'[NeRFDataset] Failed to decode frame {frame_id}: {f_path}'
+                )
             if self.H is None or self.W is None:
                 self.H = image.shape[0] // downscale
                 self.W = image.shape[1] // downscale
@@ -244,25 +374,33 @@ class NeRFDataset:
 
             self.poses.append(pose)
             self.images.append(image)
+            loaded_frame_ids.append(frame_id)
 
+        self.frame_ids = loaded_frame_ids
 
         # few shot
-        if type == 'train' and self.opt.few_shot > 0 and self.opt.few_shot < len(self.images):
+        if type == 'train' and self.split_file is not None:
+            if self.opt.few_shot > 0 and self.opt.few_shot != len(self.images):
+                raise ValueError(
+                    f'[NeRFDataset] --few_shot={self.opt.few_shot}, but the explicit '
+                    f'train split contains {len(self.images)} frames'
+                )
+        elif type == 'train' and self.opt.few_shot > 0 and self.opt.few_shot < len(self.images):
             if self.opt.few_shot == 8: # NeRF-Synthetic
                 indicies = [26, 86, 2, 55, 75, 93, 16, 73]
-                self.images = [self.images[i] for i in indicies]
-                self.poses = [self.poses[i] for i in indicies]
             else:
-                idx_sub = np.linspace(0, len(self.images) - 1, self.opt.few_shot)
-                idx_sub = [round(i) for i in idx_sub]
-                self.images = [self.images[i] for i in idx_sub]
-                self.poses = [self.poses[i] for i in idx_sub]
+                indicies = np.linspace(0, len(self.images) - 1, self.opt.few_shot)
+                indicies = [round(i) for i in indicies]
+            self.images = [self.images[i] for i in indicies]
+            self.poses = [self.poses[i] for i in indicies]
+            self.frame_ids = [self.frame_ids[i] for i in indicies]
 
         if (type == 'test' or type == 'val') and self.opt.num_testval_images is not None:
             idx_sub = np.linspace(0, len(self.images) - 1, self.opt.num_testval_images)
             idx_sub = [round(i) for i in idx_sub]
             self.images = [self.images[i] for i in idx_sub]
             self.poses = [self.poses[i] for i in idx_sub]
+            self.frame_ids = [self.frame_ids[i] for i in idx_sub]
 
             
         self.poses = torch.from_numpy(np.stack(self.poses, axis=0)) # [N, 4, 4]

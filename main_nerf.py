@@ -42,8 +42,14 @@ if __name__ == '__main__':
 
     ### training options
     parser.add_argument('--iters', type=int, default=30000, help="training iters")
+    parser.add_argument('--stop_at_step', type=int, default=None,
+                        help='optional global step at which to stop while keeping --iters as the LR schedule horizon')
     parser.add_argument('--lr', type=float, default=1e-2, help="initial learning rate")
     parser.add_argument('--ckpt', type=str, default='latest')
+    parser.add_argument('--amp_max_retries', type=int, default=4,
+                        help='maximum retries of the same batch after an FP16 gradient overflow')
+    parser.add_argument('--detect_anomaly', action='store_true',
+                        help='enable expensive autograd anomaly detection for debugging')
     parser.add_argument('--num_rays', type=int, default=4096, help="num rays sampled per image for each training step")
     parser.add_argument('--cuda_ray', action='store_true', help="use CUDA raymarching instead of pytorch")
     parser.add_argument('--max_steps', type=int, default=1024, help="max num steps sampled per ray (only valid when using --cuda_ray)")
@@ -86,10 +92,27 @@ if __name__ == '__main__':
                         help='start applying NeurTV after this iteration')
     parser.add_argument('--neurtv_end_iter', type=int, default=None,
                         help='stop applying NeurTV after this iteration')
-    parser.add_argument('--neurtv_weighted', action='store_true',
-                        help='weight NeurTV by volume rendering weights')
-    parser.add_argument('--neurtv_sigma_thresh', type=float, default=0.0,
-                        help='optional sigma threshold for masking empty space')
+    parser.add_argument('--neurtv_num_samples', type=int, default=4096,
+                        help='number of random 3D samples used by NeurTV per training step')
+    parser.add_argument('--neurtv_fd_epsilon', type=float, default=0.01,
+                        help='central finite-difference step as a fraction of the scene bound')
+
+    ### Virtual ray augmentation
+    virtual_ray_group = parser.add_mutually_exclusive_group()
+    virtual_ray_group.add_argument('--virtual_ray', dest='virtual_ray', action='store_true',
+                                   help='enable virtual ray augmentation')
+    virtual_ray_group.add_argument('--no_virtual_ray', dest='virtual_ray', action='store_false',
+                                   help='disable virtual ray augmentation')
+    parser.set_defaults(virtual_ray=True)
+    parser.add_argument('--virtual_ray_start_iter', type=int, default=1000,
+                        help='start virtual ray augmentation at this training iteration')
+    parser.add_argument('--virtual_ray_k', type=int, default=10,
+                        help='number of virtual rays generated for each original ray')
+    parser.add_argument('--virtual_ray_jsd_th', type=float, default=0.02,
+                        help='Jensen-Shannon divergence threshold for accepting virtual rays')
+    parser.add_argument('--virtual_ray_depth_lambda', type=float, default=0.1,
+                        help='lambda coefficient of virtual-ray depth consistency')
+
     ### Diffusion Geometric regularization
     parser.add_argument('--diff_reg', action='store_true', help="use diffusion geometric regulazition additional losses")
     parser.add_argument('--loss_dist', action='store_true', help="use loss_dist")
@@ -173,7 +196,7 @@ if __name__ == '__main__':
                         help='lambda for smoothing loss')
     parser.add_argument("--smoothing_activation", type=str, default='norm',
                         help='how to make alpha to the distribution')
-    parser.add_argument("--smoothing_step_size", type=int, default='5000',
+    parser.add_argument("--smoothing_step_size", type=int, default=5000,
                         help='reducing smoothing every')
     parser.add_argument("--smoothing_rate", type=float, default=0.5,
                         help='reducing smoothing rate')
@@ -198,6 +221,8 @@ if __name__ == '__main__':
     parser.add_argument('--density_thresh', type=float, default=10, help="threshold for density grid to be occupied")
     parser.add_argument('--bg_radius', type=float, default=-1, help="if positive, use a background model at sphere(bg_radius)")
     parser.add_argument('--downscale', type=int, default=8, help="Set downscale for resolution of images")#缩小 1-8
+    parser.add_argument('--split_file', type=str, default=None,
+                        help='JSON file containing explicit train_ids/val_ids/test_ids in transforms.json frame order')
 
     ### GUI options
     parser.add_argument('--gui', action='store_true', help="start a GUI")
@@ -213,7 +238,32 @@ if __name__ == '__main__':
     parser.add_argument('--rand_pose', type=int, default=-1, help="<0 uses no rand pose, =0 only uses rand pose, >0 sample one rand pose every $ known poses")
 
 
-    opt, _ = parser.parse_known_args()
+    opt = parser.parse_args()
+
+    if opt.neurtv_num_samples <= 0:
+        parser.error('--neurtv_num_samples must be positive')
+    if not 0 < opt.neurtv_fd_epsilon < 1:
+        parser.error('--neurtv_fd_epsilon must be in the open interval (0, 1)')
+    if opt.iters <= 0:
+        parser.error('--iters must be positive')
+    if opt.amp_max_retries < 0:
+        parser.error('--amp_max_retries must be non-negative')
+    if opt.stop_at_step is not None and not 0 < opt.stop_at_step <= opt.iters:
+        parser.error('--stop_at_step must be in the range [1, --iters]')
+    if opt.neurtv_start_iter < 0:
+        parser.error('--neurtv_start_iter must be non-negative')
+    if opt.neurtv_end_iter is not None and opt.neurtv_end_iter < opt.neurtv_start_iter:
+        parser.error('--neurtv_end_iter must be greater than or equal to --neurtv_start_iter')
+    if opt.virtual_ray_start_iter < 0:
+        parser.error('--virtual_ray_start_iter must be non-negative')
+    if opt.virtual_ray_k <= 0:
+        parser.error('--virtual_ray_k must be positive')
+    if opt.virtual_ray_jsd_th < 0:
+        parser.error('--virtual_ray_jsd_th must be non-negative')
+    if opt.virtual_ray_depth_lambda < 0:
+        parser.error('--virtual_ray_depth_lambda must be non-negative')
+
+    torch.autograd.set_detect_anomaly(opt.detect_anomaly)
 
     if opt.O:
         opt.fp16 = True
@@ -330,10 +380,38 @@ if __name__ == '__main__':
                 print("Warning: failed to create validation loader. Reason:", _e)
 
             try:
-                max_epoch = np.ceil(opt.iters / len(train_loader)).astype(np.int32)
+                steps_per_epoch = len(train_loader)
+                target_step = opt.stop_at_step if opt.stop_at_step is not None else opt.iters
+                if target_step % steps_per_epoch != 0:
+                    raise ValueError(
+                        f'target global step {target_step} is not divisible by '
+                        f'{steps_per_epoch} steps/epoch; choose an epoch-aligned '
+                        'target so the checkpoint is exactly resumable'
+                    )
+                if trainer.global_step % steps_per_epoch != 0:
+                    raise ValueError(
+                        f'checkpoint global_step={trainer.global_step} is not aligned '
+                        f'to {steps_per_epoch} steps/epoch'
+                    )
+                if trainer.epoch != trainer.global_step // steps_per_epoch:
+                    raise ValueError(
+                        f'checkpoint epoch/global_step mismatch: epoch={trainer.epoch}, '
+                        f'global_step={trainer.global_step}, steps_per_epoch={steps_per_epoch}'
+                    )
+                if trainer.global_step > target_step:
+                    raise ValueError(
+                        f'checkpoint global_step={trainer.global_step} is already beyond '
+                        f'the requested target global_step={target_step}'
+                    )
+                max_epoch = target_step // steps_per_epoch
+                print(
+                    f'Training target: global_step={target_step}; '
+                    f'LR schedule horizon: {opt.iters}; '
+                    f'resume from global_step={trainer.global_step}.'
+                )
             except Exception as _e:
                 print("Warning: failed to compute max_epoch from train_loader length. Reason:", _e)
-                max_epoch = None
+                raise
 
             try:
                 if max_epoch is None:

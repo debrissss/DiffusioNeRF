@@ -9,7 +9,6 @@ import torch.nn.functional as F
 import torch.backends.cudnn as cudnn
 
 from nerf.adv.utils import *
-torch.autograd.set_detect_anomaly(True)
 
 __all__ = ['attack_pgd']
 

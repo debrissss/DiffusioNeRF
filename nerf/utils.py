@@ -356,6 +356,17 @@ class LPIPSMeter:
         return f'LPIPS ({self.net}) = {self.measure():.6f}'
 
 class Trainer(object):
+    _RESUME_CONFIG_IGNORED_KEYS = {
+        'ckpt',
+        'dataset_name',
+        'gui',
+        'implementation_name',
+        'stop_at_step',
+        'test',
+        'workspace',
+        'write_table',
+    }
+
     def __init__(self, 
                  name, # name of this experiment
                  opt, # extra conf
@@ -513,6 +524,106 @@ class Trainer(object):
                 print(*args, file=self.log_ptr)
                 self.log_ptr.flush() # write immediately to file
 
+    @staticmethod
+    def _atomic_torch_save(state, file_path):
+        """Write a checkpoint atomically so an interrupted save keeps the old file valid."""
+        tmp_path = f'{file_path}.tmp.{os.getpid()}'
+        try:
+            torch.save(state, tmp_path)
+            os.replace(tmp_path, file_path)
+        finally:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+
+    def _is_managed_checkpoint_path(self, file_path):
+        """Only checkpoint files directly inside this Trainer's workspace are removable."""
+        return (
+            os.path.dirname(os.path.realpath(file_path))
+            == os.path.realpath(self.ckpt_path)
+        )
+
+    @staticmethod
+    def _capture_rng_state():
+        return {
+            'python': random.getstate(),
+            'numpy': np.random.get_state(),
+            'torch': torch.get_rng_state(),
+            'cuda': torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
+        }
+
+    @staticmethod
+    def _restore_rng_state(rng_state):
+        random.setstate(rng_state['python'])
+        np.random.set_state(rng_state['numpy'])
+        torch.set_rng_state(rng_state['torch'].cpu())
+        if torch.cuda.is_available() and rng_state.get('cuda') is not None:
+            torch.cuda.set_rng_state_all([state.cpu() for state in rng_state['cuda']])
+
+    def _validate_resume_config(self, saved_config):
+        current_config = vars(self.opt)
+        differences = []
+        for key in sorted(set(saved_config).intersection(current_config)):
+            if key in self._RESUME_CONFIG_IGNORED_KEYS:
+                continue
+            if saved_config[key] != current_config[key]:
+                differences.append(
+                    f'{key}: checkpoint={saved_config[key]!r}, current={current_config[key]!r}'
+                )
+
+        if differences:
+            details = '\n  '.join(differences)
+            raise ValueError(
+                'Refusing to resume with a different experiment configuration:\n'
+                f'  {details}'
+            )
+
+    def _optimize_with_amp_retry(self, closure):
+        """Run one optimizer update, retrying the same stochastic batch after AMP overflow."""
+        max_retries = getattr(self.opt, 'amp_max_retries', 4)
+        retry_rng_state = self._capture_rng_state()
+
+        for attempt in range(max_retries + 1):
+            if attempt > 0:
+                self._restore_rng_state(retry_rng_state)
+
+            self.optimizer.zero_grad()
+
+            with torch.cuda.amp.autocast(enabled=self.fp16):
+                preds, truths, loss = closure()
+
+            if not torch.isfinite(loss).all():
+                raise FloatingPointError(
+                    f'Non-finite forward loss at global step {self.global_step}; '
+                    'AMP scale reduction cannot repair a non-finite forward pass.'
+                )
+
+            scale_before = self.scaler.get_scale()
+            self.scaler.scale(loss).backward()
+            self.scaler.step(self.optimizer)
+            self.scaler.update()
+            scale_after = self.scaler.get_scale()
+
+            # GradScaler skips optimizer.step() and reduces its scale when a
+            # gradient overflow is found. Replay the same stochastic batch so
+            # global_step continues to count successful optimizer updates.
+            overflow = self.fp16 and scale_after < scale_before
+            if not overflow:
+                return preds, truths, loss
+
+            if attempt == max_retries:
+                raise FloatingPointError(
+                    f'AMP gradients still overflow at global step {self.global_step} '
+                    f'after {max_retries} retries; final scale={scale_after:g}.'
+                )
+
+            self.log(
+                f'[WARN] AMP gradient overflow at global step {self.global_step}: '
+                f'scale {scale_before:g} -> {scale_after:g}; replaying batch '
+                f'({attempt + 1}/{max_retries}).'
+            )
+
+        raise RuntimeError('unreachable AMP retry state')
+
 
  
 
@@ -570,44 +681,40 @@ class Trainer(object):
                 t_s
             )
     #######结束######
-    def compute_neurtv_loss(model, bound, num_samples, device, perturb=False):
+    @staticmethod
+    def compute_neurtv_loss(model, bound, num_samples, device, fd_epsilon):
         """
-        随机采样点，对密度场计算空间梯度的 L1 范数作为 NeurTV 损失。
+        Use central finite differences to approximate density-field spatial
+        gradients, then compute their L1 norm as NeurTV loss.
 
-        参数:
-            model: NeRF 模型（需要包含 density 方法）
-            bound: 场景包围盒半径（self.opt.bound，绝对值）
-            num_samples: 采样点数（如 4096）
-            device: 设备
-            perturb: 是否加微小扰动（建议 True）
-        返回:
-            tv_loss: 标量
+        The hash-grid encoder has a custom CUDA backward without reliable
+        higher-order derivatives. Finite differences keep the NeurTV objective
+        differentiable with respect to model parameters using first-order
+        backpropagation only.
         """
-        # 在 [-bound, bound]^3 内均匀随机采样
-        pts = (torch.rand(num_samples, 3, device=device) * 2 - 1) * bound
-        if perturb:
-            pts = pts + (torch.randn_like(pts) * 0.01 * bound)  # 微小噪声防止退化
-        pts.requires_grad_(True)
+        fd_step = float(bound) * fd_epsilon
+        sample_extent = float(bound) - fd_step
+        if sample_extent <= 0:
+            raise ValueError('NeurTV finite-difference step must be smaller than the scene bound')
 
-        # 计算密度
-        sigma = model.density(pts)['sigma']  # [num_samples, 1] 或 [num_samples]
+        with torch.cuda.amp.autocast(enabled=False):
+            points = (
+                torch.rand(num_samples, 3, device=device, dtype=torch.float32) * 2 - 1
+            ) * sample_extent
+            offsets = torch.eye(3, device=device, dtype=points.dtype) * fd_step
 
-        # 计算梯度
-        grad_outputs = torch.ones_like(sigma)
-        grad = torch.autograd.grad(
-            outputs=sigma, inputs=pts,
-            grad_outputs=grad_outputs,
-            create_graph=True,     # 允许二阶梯度，以便优化器反向传播
-            retain_graph=True,
-            only_inputs=True
-        )[0]  # [num_samples, 3]
+            points_plus = points[:, None, :] + offsets[None, :, :]
+            points_minus = points[:, None, :] - offsets[None, :, :]
+            query_points = torch.cat([points_plus, points_minus], dim=1).reshape(-1, 3)
 
-        # TV 正则（ 
-        tv_loss = grad.norm(p=1, dim=-1).mean()
+            sigma = model.density(query_points)['sigma'].reshape(num_samples, 6, -1)
+            sigma_plus = sigma[:, :3]
+            sigma_minus = sigma[:, 3:]
+            density_grad = (sigma_plus - sigma_minus) / (2 * fd_step)
 
-        return tv_loss                
-                                
-    ### ------------------------------	
+            return density_grad.abs().sum(dim=1).mean()
+
+    ### ------------------------------
 
     def train_step(self, data, adv_perturb={}):
 
@@ -685,16 +792,9 @@ class Trainer(object):
             loss = loss_clean
 
         # =========================
-        # virtual ray augmentation增强
-        """
-        virtual_ray = True
-        self.global_step >= 3000
-        virtual_ray_jsd_th = 0.02
-        virtual_ray_depth_lambda = 1e-7
-        """
+        # virtual ray augmentation
         # =========================
-        #if getattr(self.opt, 'virtual_ray', True):
-        if getattr(self.opt, 'virtual_ray', True) and self.global_step >= 1000:
+        if self.opt.virtual_ray and self.global_step >= self.opt.virtual_ray_start_iter:
             # 单独调用一次 run()，拿到 weights / z_vals
             render_kwargs = vars(self.opt).copy()
             for k in [
@@ -727,8 +827,8 @@ class Trainer(object):
             orig_p = orig_weights / (orig_weights.sum(dim=-1, keepdim=True) + 1e-8)  # [M, T]
 
             # generate K virtual rays per original ray
-            virtual_k = getattr(self.opt, 'virtual_ray_k', 10)
-            O_prime, d_prime, P_s, t_s = self.build_virtual_rays(
+            virtual_k = self.opt.virtual_ray_k
+            O_prime, d_prime, P_s, _ = self.build_virtual_rays(
                 rays_o, rays_d, orig_z_vals, orig_weights, K=virtual_k
             )  # O_prime/d_prime: [M*K, 3], P_s: [M, 3]
 
@@ -762,8 +862,7 @@ class Trainer(object):
                 (virtual_q * (torch.log(virtual_q + eps) - torch.log(m + eps))).sum(dim=-1)
             )  # [M, K]
 
-            jsd_th = getattr(self.opt, 'virtual_ray_jsd_th', 0.02)
-            mask = jsd < jsd_th   # [M, K]
+            mask = jsd < self.opt.virtual_ray_jsd_th   # [M, K]
 
             # 保留下来的虚拟射线
             mask_flat = mask.reshape(-1)  # [M*K]
@@ -796,9 +895,7 @@ class Trainer(object):
                 target_depth_virtual = torch.norm(selected_O - selected_Ps, dim=-1)  # [Ns]
 
                 loss_virtual_depth = F.l1_loss(pred_depth_virtual, target_depth_virtual)
-                loss_virtual_jsd = jsd.reshape(-1)[mask_flat].mean()
-
-                loss = loss + getattr(self.opt, 'virtual_ray_depth_lambda', 0.1) * loss_virtual_depth
+                loss = loss + self.opt.virtual_ray_depth_lambda * loss_virtual_depth
              
 
         # patch-based rendering
@@ -857,24 +954,19 @@ class Trainer(object):
                 or self.global_step <= self.opt.neurtv_end_iter
             )
         ):
-            # 计算 NeurTV 损失（直接调用函数）
-            tv_loss = compute_neurtv_loss(
+            tv_loss = self.compute_neurtv_loss(
                 self.model,
                 bound=self.opt.bound,
-                num_samples=getattr(self.opt, 'neurtv_num_samples', 4096),
+                num_samples=self.opt.neurtv_num_samples,
                 device=self.device,
-                perturb=True
+                fd_epsilon=self.opt.neurtv_fd_epsilon
             )
             loss = loss + self.opt.neurtv_lambda * tv_loss
 
             # 记录到日志
             if self.local_rank == 0 and self.global_step % 100 == 0:
-                self.log(f"[NeurTV] step {self.global_step}: tv_loss = {tv_loss.item():.6f}")               
-            
-            
-            
-            
-            
+                self.log(f"[NeurTV] step {self.global_step}: tv_loss = {tv_loss.item():.6f}")
+
         ### Geometric diffusion loss
         if self.opt.diff_reg and self.global_step >= self.opt.diff_reg_start_iter and self.global_step/self.opt.iters < self.opt.diff_reg_end_rate:
             # loss_dist
@@ -1180,14 +1272,9 @@ class Trainer(object):
             
             self.global_step += 1
 
-            self.optimizer.zero_grad()
-
-            with torch.cuda.amp.autocast(enabled=self.fp16):
-                preds, truths, loss = self.train_step(data)
-         
-            self.scaler.scale(loss).backward()
-            self.scaler.step(self.optimizer)
-            self.scaler.update()
+            preds, truths, loss = self._optimize_with_amp_retry(
+                lambda: self.train_step(data)
+            )
             
             if self.scheduler_update_every_step:
                 self.lr_scheduler.step()
@@ -1402,14 +1489,9 @@ class Trainer(object):
 
             self.model.train()
 
-            self.optimizer.zero_grad()
-
-            with torch.cuda.amp.autocast(enabled=self.fp16):
-                preds, truths, loss = self.train_step(data, adv_perturb= adv_perturb)
-         
-            self.scaler.scale(loss).backward()
-            self.scaler.step(self.optimizer)
-            self.scaler.update()
+            preds, truths, loss = self._optimize_with_amp_retry(
+                lambda: self.train_step(data, adv_perturb=adv_perturb)
+            )
 
             if self.scheduler_update_every_step:
                 self.lr_scheduler.step()
@@ -1570,6 +1652,7 @@ class Trainer(object):
             'epoch': self.epoch,
             'global_step': self.global_step,
             'stats': self.stats,
+            'config': vars(self.opt).copy(),
         }
 
         if self.model.cuda_ray:
@@ -1580,6 +1663,7 @@ class Trainer(object):
             state['optimizer'] = self.optimizer.state_dict()
             state['lr_scheduler'] = self.lr_scheduler.state_dict()
             state['scaler'] = self.scaler.state_dict()
+            state['rng_state'] = self._capture_rng_state()
             if self.ema is not None:
                 state['ema'] = self.ema.state_dict()
         
@@ -1589,15 +1673,22 @@ class Trainer(object):
 
             file_path = f"{self.ckpt_path}/{name}.pth"
 
+            old_ckpt = None
             if remove_old:
                 self.stats["checkpoints"].append(file_path)
 
                 if len(self.stats["checkpoints"]) > self.max_keep_ckpt:
                     old_ckpt = self.stats["checkpoints"].pop(0)
-                    if os.path.exists(old_ckpt):
-                        os.remove(old_ckpt)
 
-            torch.save(state, file_path)
+            self._atomic_torch_save(state, file_path)
+            if old_ckpt is not None and old_ckpt != file_path:
+                if not self._is_managed_checkpoint_path(old_ckpt):
+                    self.log(
+                        f'[WARN] Refusing to remove checkpoint outside the current '
+                        f'workspace: {old_ckpt}'
+                    )
+                elif os.path.exists(old_ckpt):
+                    os.remove(old_ckpt)
 
         else:    
             if len(self.stats["results"]) > 0:
@@ -1619,15 +1710,15 @@ class Trainer(object):
                     if self.ema is not None:
                         self.ema.restore()
                     
-                    torch.save(state, self.best_path)
+                    self._atomic_torch_save(state, self.best_path)
             else:
                 self.log(f"[WARN] no evaluated results found, skip saving best checkpoint.")
             
     def load_checkpoint(self, checkpoint=None, model_only=False):
         if checkpoint is None:
-            checkpoint_list = sorted(glob.glob(f'{self.ckpt_path}/{self.name}_ep*.pth'))
+            checkpoint_list = glob.glob(f'{self.ckpt_path}/{self.name}_ep*.pth')
             if checkpoint_list:
-                checkpoint = checkpoint_list[-1]
+                checkpoint = max(checkpoint_list, key=os.path.getmtime)
                 self.log(f"[INFO] Latest checkpoint is {checkpoint}")
             else:
                 self.log("[WARN] No checkpoint found, model randomly initialized.")
@@ -1639,6 +1730,12 @@ class Trainer(object):
             self.model.load_state_dict(checkpoint_dict)
             self.log("[INFO] loaded model.")
             return
+
+        if 'config' in checkpoint_dict:
+            self._validate_resume_config(checkpoint_dict['config'])
+            self.log("[INFO] checkpoint configuration matches the current run.")
+        elif not model_only:
+            self.log("[WARN] Checkpoint has no saved configuration; resume compatibility cannot be verified.")
 
         missing_keys, unexpected_keys = self.model.load_state_dict(checkpoint_dict['model'], strict=False)
         self.log("[INFO] loaded model.")
@@ -1660,6 +1757,25 @@ class Trainer(object):
             return
 
         self.stats = checkpoint_dict['stats']
+        checkpoint_history = self.stats.get('checkpoints', [])
+        managed_history = [
+            file_path for file_path in checkpoint_history
+            if self._is_managed_checkpoint_path(file_path)
+        ]
+        if self._is_managed_checkpoint_path(checkpoint):
+            loaded_checkpoint = os.path.abspath(checkpoint)
+            managed_realpaths = {
+                os.path.realpath(file_path) for file_path in managed_history
+            }
+            if os.path.realpath(loaded_checkpoint) not in managed_realpaths:
+                managed_history.append(loaded_checkpoint)
+            managed_history = managed_history[-self.max_keep_ckpt:]
+        if len(managed_history) != len(checkpoint_history):
+            self.log(
+                '[INFO] Reset checkpoint rotation history for the current workspace; '
+                'external checkpoint paths will never be removed.'
+            )
+        self.stats['checkpoints'] = managed_history
         self.epoch = checkpoint_dict['epoch']
         self.global_step = checkpoint_dict['global_step']
         self.log(f"[INFO] load at epoch {self.epoch}, global step {self.global_step}")
@@ -1668,19 +1784,25 @@ class Trainer(object):
             try:
                 self.optimizer.load_state_dict(checkpoint_dict['optimizer'])
                 self.log("[INFO] loaded optimizer.")
-            except:
-                self.log("[WARN] Failed to load optimizer.")
+            except Exception as exc:
+                raise RuntimeError("Failed to restore optimizer state.") from exc
         
         if self.lr_scheduler and 'lr_scheduler' in checkpoint_dict:
             try:
                 self.lr_scheduler.load_state_dict(checkpoint_dict['lr_scheduler'])
                 self.log("[INFO] loaded scheduler.")
-            except:
-                self.log("[WARN] Failed to load scheduler.")
+            except Exception as exc:
+                raise RuntimeError("Failed to restore scheduler state.") from exc
         
         if self.scaler and 'scaler' in checkpoint_dict:
             try:
                 self.scaler.load_state_dict(checkpoint_dict['scaler'])
                 self.log("[INFO] loaded scaler.")
-            except:
-                self.log("[WARN] Failed to load scaler.")
+            except Exception as exc:
+                raise RuntimeError("Failed to restore AMP scaler state.") from exc
+
+        if 'rng_state' in checkpoint_dict:
+            self._restore_rng_state(checkpoint_dict['rng_state'])
+            self.log("[INFO] restored Python, NumPy, PyTorch, and CUDA RNG states.")
+        else:
+            self.log("[WARN] Checkpoint has no RNG state; resumed training will not be bitwise reproducible.")
