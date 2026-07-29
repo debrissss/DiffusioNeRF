@@ -8,6 +8,7 @@ import hashlib
 import json
 import platform
 import random
+import shutil
 import subprocess
 import sys
 import warnings
@@ -373,6 +374,7 @@ class Trainer(object):
         'eval_variants',
         'gui',
         'implementation_name',
+        'milestone_steps',
         'stop_at_step',
         'test',
         'workspace',
@@ -473,6 +475,9 @@ class Trainer(object):
         self.last_checkpoint_path = None
         self.checkpoint_config = None
         self.ema_checkpoint_loaded = False
+        self.milestone_steps = frozenset(
+            int(step) for step in getattr(self.opt, 'milestone_steps', [])
+        )
         self.stats = {
             "loss": [],
             "valid_loss": [],
@@ -494,6 +499,10 @@ class Trainer(object):
 
             self.ckpt_path = os.path.join(self.workspace, 'checkpoints')
             self.best_path = f"{self.ckpt_path}/{self.name}.pth"
+            self.milestone_ckpt_path = os.path.join(
+                self.ckpt_path,
+                'milestones',
+            )
             os.makedirs(self.ckpt_path, exist_ok=True)
             
         self.log(f'[INFO] Trainer: {self.name} | {self.time_stamp} | {self.device} | {"fp16" if self.fp16 else "fp32"} | {self.workspace}')
@@ -561,6 +570,21 @@ class Trainer(object):
         try:
             torch.save(state, tmp_path)
             os.replace(tmp_path, file_path)
+        finally:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+
+    @staticmethod
+    def _atomic_copy_file(source_path, destination_path):
+        """Atomically copy a checkpoint without exposing a partial destination."""
+        os.makedirs(os.path.dirname(os.path.abspath(destination_path)), exist_ok=True)
+        tmp_path = f'{destination_path}.tmp.{os.getpid()}'
+        try:
+            with open(source_path, 'rb') as source, open(tmp_path, 'xb') as destination:
+                shutil.copyfileobj(source, destination, length=16 * 1024 * 1024)
+                destination.flush()
+                os.fsync(destination.fileno())
+            os.replace(tmp_path, destination_path)
         finally:
             if os.path.exists(tmp_path):
                 os.remove(tmp_path)
@@ -1346,6 +1370,21 @@ class Trainer(object):
         self.error_map = train_loader._data.error_map
 
         self.log(f"\nARGS: {self.opt}\n")
+
+        missed_milestones = []
+        if self.workspace is not None:
+            missed_milestones = [
+                step
+                for step in sorted(self.milestone_steps)
+                if step <= self.global_step
+                and not os.path.isfile(self._milestone_checkpoint_path(step))
+            ]
+        if missed_milestones:
+            self.log(
+                '[WARN] Training resumed after milestone steps '
+                f'{missed_milestones}, but their full checkpoints do not exist. '
+                'Past model states cannot be reconstructed and will not be backfilled.'
+            )
         
         for epoch in range(self.epoch + 1, max_epochs + 1):
             self.epoch = epoch
@@ -1354,6 +1393,7 @@ class Trainer(object):
 
             if self.workspace is not None and self.local_rank == 0:
                 self.save_checkpoint(full=True, best=False)
+                self.save_milestone_checkpoint()
 
             if self.epoch % self.eval_interval == 0:
                 self.evaluate_one_epoch(valid_loader)
@@ -2516,6 +2556,54 @@ class Trainer(object):
                     self._atomic_torch_save(state, self.best_path)
             else:
                 self.log(f"[WARN] no evaluated results found, skip saving best checkpoint.")
+
+    def _milestone_checkpoint_path(self, step):
+        if self.workspace is None:
+            raise RuntimeError('Milestone checkpoints require a workspace')
+        return os.path.join(
+            self.milestone_ckpt_path,
+            f'{self.name}_step_{int(step):06d}.pth',
+        )
+
+    def save_milestone_checkpoint(self):
+        """Preserve the current rolling full checkpoint at configured steps."""
+        if self.global_step not in self.milestone_steps:
+            return None
+        if self.last_checkpoint_path is None:
+            raise RuntimeError(
+                f'Cannot preserve milestone step {self.global_step}: '
+                'no full checkpoint was saved first'
+            )
+
+        source_path = os.path.abspath(self.last_checkpoint_path)
+        destination_path = os.path.abspath(
+            self._milestone_checkpoint_path(self.global_step)
+        )
+        if not os.path.isfile(source_path):
+            raise FileNotFoundError(
+                f'Milestone source checkpoint does not exist: {source_path}'
+            )
+
+        if os.path.isfile(destination_path):
+            source_sha256 = self._sha256_file(source_path)
+            destination_sha256 = self._sha256_file(destination_path)
+            if source_sha256 == destination_sha256:
+                self.log(
+                    f'[INFO] Milestone checkpoint already exists and matches: '
+                    f'{destination_path}'
+                )
+                return destination_path
+            raise FileExistsError(
+                f'Refusing to overwrite a different checkpoint at milestone '
+                f'step {self.global_step}: {destination_path}'
+            )
+
+        self._atomic_copy_file(source_path, destination_path)
+        self.log(
+            f'[INFO] Preserved full milestone checkpoint at global step '
+            f'{self.global_step}: {destination_path}'
+        )
+        return destination_path
             
     def load_checkpoint(
         self,

@@ -74,6 +74,16 @@ if __name__ == '__main__':
     parser.add_argument('--iters', type=int, default=30000, help="training iters")
     parser.add_argument('--stop_at_step', type=int, default=None,
                         help='optional global step at which to stop while keeping --iters as the LR schedule horizon')
+    parser.add_argument(
+        '--milestone_steps',
+        type=int,
+        nargs='+',
+        default=[],
+        help=(
+            'global steps at which to preserve full resumable checkpoints '
+            'outside the rolling latest-checkpoint history'
+        ),
+    )
     parser.add_argument('--lr', type=float, default=1e-2, help="initial learning rate")
     parser.add_argument('--ckpt', type=str, default='latest')
     parser.add_argument('--amp_max_retries', type=int, default=4,
@@ -282,6 +292,11 @@ if __name__ == '__main__':
         parser.error('--amp_max_retries must be non-negative')
     if opt.stop_at_step is not None and not 0 < opt.stop_at_step <= opt.iters:
         parser.error('--stop_at_step must be in the range [1, --iters]')
+    if len(opt.milestone_steps) != len(set(opt.milestone_steps)):
+        parser.error('--milestone_steps must not contain duplicates')
+    if any(not 0 < step <= opt.iters for step in opt.milestone_steps):
+        parser.error('--milestone_steps must all be in the range [1, --iters]')
+    opt.milestone_steps = sorted(opt.milestone_steps)
     if opt.neurtv_start_iter < 0:
         parser.error('--neurtv_start_iter must be non-negative')
     if opt.neurtv_end_iter is not None and opt.neurtv_end_iter < opt.neurtv_start_iter:
@@ -435,6 +450,17 @@ if __name__ == '__main__':
                     raise ValueError(
                         f'checkpoint epoch/global_step mismatch: epoch={trainer.epoch}, '
                         f'global_step={trainer.global_step}, steps_per_epoch={steps_per_epoch}'
+                    )
+                unaligned_milestones = [
+                    step
+                    for step in opt.milestone_steps
+                    if step % steps_per_epoch != 0
+                ]
+                if unaligned_milestones:
+                    raise ValueError(
+                        f'milestone steps {unaligned_milestones} are not divisible '
+                        f'by {steps_per_epoch} steps/epoch; milestone checkpoints '
+                        'must be saved at exactly resumable epoch boundaries'
                     )
                 if trainer.global_step > target_step:
                     raise ValueError(

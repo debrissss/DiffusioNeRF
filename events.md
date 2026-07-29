@@ -618,3 +618,184 @@ manifest 同时记录了 `main_nerf.py`、`nerf/provider.py` 和 `nerf/utils.py`
 的精确 SHA256，因此当前未提交状态下的评测代码仍可审计。正式启动剩余
 七场景前，应先提交本次代码和文档修改，再使用 `EVAL_OVERWRITE=1` 重新
 生成一次 Fern 归档，使 manifest 记录干净的正式 commit。
+
+---
+
+## 2026-07-29：增加固定训练里程碑 checkpoint 保存
+
+### 1. 事件背景
+
+Room 3-view 的 30,000-step 正式评测显示，不同指标的最佳训练阶段并不
+一致：
+
+```text
+checkpoint                    PSNR       SSIM       LPIPS
+best EMA snapshot @ 8,100     21.899831  0.821332   0.186952
+latest Raw @ 30,000           21.665818  0.814473   0.177734
+latest EMA @ 30,000           21.662162  0.814505   0.177570
+```
+
+step 8,100 在 PSNR 和 SSIM 上优于 step 30,000，而 step 30,000 在 LPIPS
+上更好。这说明只保留验证集 best 和最终 latest 无法支持完整的训练阶段
+分析。
+
+修改前，Trainer 虽然每个 epoch 都写入完整 checkpoint，但
+`max_keep_ckpt=1` 会删除旧文件。一次训练结束后通常只剩：
+
+- `checkpoints/ngp.pth`：按单张验证图 MSE 选择的 EMA 模型快照，不含完整
+  优化器状态；
+- `checkpoints/ngp_epXXXX.pth`：最新一个完整、可恢复 checkpoint。
+
+被轮换删除的中间状态无法事后恢复，因此需要在训练时显式保留若干固定
+global step。
+
+### 2. 保存协议
+
+新增 CLI 参数：
+
+```text
+--milestone_steps STEP [STEP ...]
+```
+
+里程碑 checkpoint 的行为规定如下：
+
+1. 每个里程碑必须是正整数、不重复且不超过 `--iters`。
+2. 每个里程碑必须能被当前 `steps_per_epoch` 整除，确保文件位于完整
+   epoch 边界并可精确 resume。
+3. Trainer 先按原逻辑原子写入当步 latest 完整 checkpoint，再将该文件
+   原子复制到：
+
+   ```text
+   checkpoints/milestones/ngp_step_XXXXXX.pth
+   ```
+
+4. 里程碑文件和当步 latest 文件字节一致，包含：
+   - Raw 模型参数；
+   - EMA 状态；
+   - optimizer；
+   - LR scheduler；
+   - AMP GradScaler；
+   - Python、NumPy、PyTorch 和 CUDA RNG；
+   - epoch、global step、统计记录和实验配置。
+5. `checkpoints/milestones/` 是 latest 轮换目录的子目录，不会进入
+   `max_keep_ckpt=1` 的删除队列。从里程碑恢复后继续训练，也不会删除该
+   里程碑。
+6. 复制里程碑不会修改 `last_checkpoint_path`。训练结束后的正式评测仍
+   加载权威 latest checkpoint。
+7. 如果同名里程碑已经存在：
+   - SHA256 相同则视为幂等操作；
+   - 内容不同则抛出 `FileExistsError`，拒绝静默覆盖。
+8. 从较晚 step 恢复时，如果过去的里程碑不存在，Trainer 会明确警告无法
+   回填，但不会伪造历史模型状态。
+9. `milestone_steps` 只控制保留策略，不改变模型优化轨迹，因此允许续训时
+   调整，不参与训练超参数兼容性拒绝。
+
+### 3. 默认 LLFF 3-view 配置
+
+`run_DiffusioNeRF_LLFF_3v_NeurTV_Ray.sh` 默认保留：
+
+```text
+6,000
+9,000
+12,000
+18,000
+24,000
+27,000
+```
+
+step 30,000 已由 latest 完整 checkpoint 保留，因此默认不再复制一个重复
+的 30,000-step 里程碑。正常完成 30,000-step 训练且验证正常时，最终约有
+8 个 checkpoint：
+
+- 6 个完整里程碑；
+- 1 个最终 latest 完整 checkpoint；
+- 1 个验证 best 模型快照。
+
+可以通过环境变量覆盖默认节点：
+
+```bash
+MILESTONE_STEPS="6000 8100 9000 12000 18000 24000 27000" \
+  ./run_DiffusioNeRF_LLFF_3v_NeurTV_Ray.sh orchids
+```
+
+也可以显式关闭：
+
+```bash
+MILESTONE_STEPS="" \
+  ./run_DiffusioNeRF_LLFF_3v_NeurTV_Ray.sh orchids
+```
+
+按 Room 完整 checkpoint 约 260.7 MB 估算，默认 6 个里程碑额外占用约
+1.46 GiB/场景，8 个 LLFF 场景约 11.65 GiB。修改时实验盘剩余空间约
+37 GiB，可以容纳该配置。
+
+### 4. 修改的代码文件
+
+#### `main_nerf.py`
+
+- 增加 `--milestone_steps` 参数。
+- 校验正数、范围、重复项和排序。
+- 在获得真实 `steps_per_epoch` 后校验所有节点位于可精确恢复的 epoch
+  边界。
+
+#### `nerf/utils.py`
+
+- 将里程碑列表保存为 Trainer 状态。
+- 增加带 `fsync` 和 `os.replace()` 的原子文件复制。
+- 在每个 latest 完整 checkpoint 写入后检查并保存里程碑。
+- 增加受保护的里程碑目录、幂等 SHA256 检查和防覆盖逻辑。
+- 对已经越过但不存在的节点输出不可回填警告。
+- 将 `milestone_steps` 加入允许续训时变化的非优化配置。
+
+#### `run_DiffusioNeRF_LLFF_3v_NeurTV_Ray.sh`
+
+- 增加默认 6 个固定节点和 `MILESTONE_STEPS` 环境变量。
+- 输出实际启用的节点。
+- scratch 防覆盖检查改为递归检查 `checkpoints/`，同时覆盖
+  `checkpoints/milestones/`。
+
+#### `testing/test_checkpoint_milestones.py`
+
+- 新增轻量完整 checkpoint 测试。
+- 验证里程碑和 latest SHA256 完全一致。
+- 验证 checkpoint 包含模型、EMA、优化器、调度器、scaler、RNG 和配置。
+- 验证从里程碑 resume 后，latest 轮换不会删除里程碑。
+- 验证不同内容的同名里程碑不会被覆盖。
+
+### 5. 验证
+
+以下检查全部通过：
+
+1. `python -m py_compile main_nerf.py nerf/utils.py
+   testing/test_checkpoint_milestones.py`。
+2. `bash -n run_DiffusioNeRF_LLFF_3v_NeurTV_Ray.sh`。
+3. `git diff --check`。
+4. 重复 `--milestone_steps 3 3` 会由参数解析器明确拒绝。
+5. 两个 checkpoint 单元测试通过。
+6. 使用 Fern 显式 3-view split 完成隔离的真实 3-step 端到端测试：
+   - 完成 3 次 optimizer 更新；
+   - 生成 `ngp_ep0001.pth`；
+   - 生成 `milestones/ngp_step_000003.pth`；
+   - 两个文件大小均为 `208,438,499` bytes；
+   - 两个文件 SHA256 均为
+     `e39dac599159e347e7b028b0c2afdb95a09af203a6516ff5428a44b835f66a4e`；
+   - milestone 元数据为 `epoch=1 / global_step=3`；
+   - milestone 包含全部恢复状态；
+   - 训练结束后的 manifest 确认正式评测加载的是 latest；
+   - Raw 和 EMA 正式评测均完成并生成 `COMPLETE`。
+7. 烟雾测试位于独立 `mktemp` 目录，验证后按明确路径清理；没有修改 Fern、
+   Room 或其他正式实验目录。
+
+### 6. 已有实验的限制
+
+Fern 和 Room 已经完成 30,000-step 训练。旧中间完整 checkpoint 已被轮换
+删除，因此本次功能不能事后生成其 6k、9k、12k 等模型状态：
+
+- Room 当前仍只有 step 8,100 的 best EMA 模型快照和 step 30,000 的完整
+  latest；
+- Fern 同样不能回填已经丢失的历史完整状态；
+- 新功能会对之后从尚未越过节点的 checkpoint 续训，以及所有新启动的
+  场景生效。
+
+本次事件基于提交 `45d9b37` 开发，代码、测试、启动脚本与本事件记录将在
+同一个功能提交中保存。

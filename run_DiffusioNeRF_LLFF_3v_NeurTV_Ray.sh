@@ -8,6 +8,7 @@ cd "$REPO_DIR"
 GPU_ID="${GPU_ID:-0}"
 CKPT_MODE="${CKPT_MODE:-latest}"
 STOP_AT_STEP="${STOP_AT_STEP:-}"
+MILESTONE_STEPS_SPEC="${MILESTONE_STEPS-6000 9000 12000 18000 24000 27000}"
 EVAL_OVERWRITE="${EVAL_OVERWRITE:-0}"
 EVAL_ONLY="${EVAL_ONLY:-0}"
 
@@ -31,6 +32,18 @@ fi
 STOP_ARGS=()
 if [[ -n "$STOP_AT_STEP" ]]; then
     STOP_ARGS=(--stop_at_step "$STOP_AT_STEP")
+fi
+MILESTONE_ARGS=()
+MILESTONE_STEP_VALUES=()
+if [[ -n "$MILESTONE_STEPS_SPEC" ]]; then
+    read -r -a MILESTONE_STEP_VALUES <<< "$MILESTONE_STEPS_SPEC"
+    for MILESTONE_STEP in "${MILESTONE_STEP_VALUES[@]}"; do
+        if [[ ! "$MILESTONE_STEP" =~ ^[1-9][0-9]*$ ]]; then
+            echo "MILESTONE_STEPS must contain positive integer steps." >&2
+            exit 2
+        fi
+    done
+    MILESTONE_ARGS=(--milestone_steps "${MILESTONE_STEP_VALUES[@]}")
 fi
 EVAL_OVERWRITE_ARGS=()
 if [[ "$EVAL_OVERWRITE" == "1" ]]; then
@@ -84,7 +97,8 @@ for SCENE in "${SCENES[@]}"; do
     SPLIT_FILE="$REPO_DIR/splits/llff_3v/$SCENE.json"
     WORKSPACE="$REPO_DIR/test_LLFF/test_$SCENE/few_shot3/test_DiffusioNeRF_NeurTV_Ray_30k_seed0"
 
-    if [[ "$CKPT_MODE" == "scratch" ]] && compgen -G "$WORKSPACE/checkpoints/*.pth" > /dev/null; then
+    if [[ "$CKPT_MODE" == "scratch" ]] \
+        && [[ -n "$(find "$WORKSPACE/checkpoints" -type f -name '*.pth' -print -quit 2>/dev/null)" ]]; then
         echo "Refusing scratch mode because checkpoints already exist: $WORKSPACE" >&2
         echo "Use CKPT_MODE=latest to resume, or choose a new workspace." >&2
         exit 2
@@ -92,6 +106,7 @@ for SCENE in "${SCENES[@]}"; do
 
     echo "Starting LLFF 3-view NeurTV + virtual-ray experiment: $SCENE"
     echo "Checkpoint mode: $CKPT_MODE; stop_at_step: ${STOP_AT_STEP:-full 30000}"
+    echo "Protected milestone steps: ${MILESTONE_STEPS_SPEC:-disabled}"
 
     CUDA_VISIBLE_DEVICES="$GPU_ID" NO_GUI=1 python main_nerf.py \
         "$DATASET" \
@@ -104,6 +119,7 @@ for SCENE in "${SCENES[@]}"; do
         --fp16 \
         --iters 30000 \
         "${STOP_ARGS[@]}" \
+        "${MILESTONE_ARGS[@]}" \
         --eval_variants raw ema \
         --eval_split test \
         --eval_expected_step "$TARGET_STEP" \
