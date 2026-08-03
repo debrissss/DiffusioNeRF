@@ -1385,22 +1385,50 @@ class Trainer(object):
                 f'{missed_milestones}, but their full checkpoints do not exist. '
                 'Past model states cannot be reconstructed and will not be backfilled.'
             )
-        
-        for epoch in range(self.epoch + 1, max_epochs + 1):
-            self.epoch = epoch
 
-            self.train_one_epoch(train_loader)
+        steps_per_epoch = len(train_loader)
+        target_global_step = max_epochs * steps_per_epoch
+        if self.global_step > target_global_step:
+            raise ValueError(
+                f'global_step={self.global_step} exceeds the training target '
+                f'{target_global_step}'
+            )
 
-            if self.workspace is not None and self.local_rank == 0:
-                self.save_checkpoint(full=True, best=False)
-                self.save_milestone_checkpoint()
+        self._train_max_epochs = max_epochs
+        self._train_progress = None
+        if self.local_rank == 0:
+            self._train_progress = tqdm.tqdm(
+                total=target_global_step,
+                initial=self.global_step,
+                unit='step',
+                mininterval=1.0,
+                dynamic_ncols=True,
+                desc=f'Epoch {self.epoch}/{max_epochs}',
+                bar_format=(
+                    '{desc} |{bar}| step {n_fmt}/{total_fmt} '
+                    '[{elapsed} 已用, {remaining} 剩余] {postfix}'
+                ),
+            )
 
-            if self.epoch % self.eval_interval == 0:
-                self.evaluate_one_epoch(valid_loader)
-                self.save_checkpoint(full=False, best=True)
+        try:
+            for epoch in range(self.epoch + 1, max_epochs + 1):
+                self.epoch = epoch
 
-        if self.use_tensorboardX and self.local_rank == 0:
-            self.writer.close()
+                self.train_one_epoch(train_loader)
+
+                if self.workspace is not None and self.local_rank == 0:
+                    self.save_checkpoint(full=True, best=False)
+                    self.save_milestone_checkpoint()
+
+                if self.epoch % self.eval_interval == 0:
+                    self.evaluate_one_epoch(valid_loader)
+                    self.save_checkpoint(full=False, best=True)
+        finally:
+            if self._train_progress is not None:
+                self._train_progress.close()
+                self._train_progress = None
+            if self.use_tensorboardX and self.local_rank == 0:
+                self.writer.close()
 
     def evaluate(self, loader, name=None, type=None):
         self.use_tensorboardX, use_tensorboardX = False, self.use_tensorboardX
@@ -2268,8 +2296,6 @@ class Trainer(object):
         return perturb_sizes, epsilons, alphas, iters, norms
 
     def train_one_epoch(self, loader):
-        self.log(f"==> Start Training Epoch {self.epoch}, lr={self.optimizer.param_groups[0]['lr']:.6f} ...")
-
         total_loss = 0
         if self.local_rank == 0 and self.report_metric_at_train:
             for metric in self.metrics:
@@ -2282,9 +2308,6 @@ class Trainer(object):
         if self.world_size > 1:
             loader.sampler.set_epoch(self.epoch)
         
-        if self.local_rank == 0:
-            pbar = tqdm.tqdm(total=len(loader) * loader.batch_size, bar_format='{desc}: {percentage:3.0f}% {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]')
-
         self.local_step = 0
 
         num_cameras = loader._data.images.shape[0]
@@ -2348,11 +2371,24 @@ class Trainer(object):
                     self.writer.add_scalar("train/loss", loss_val, self.global_step)
                     self.writer.add_scalar("train/lr", self.optimizer.param_groups[0]['lr'], self.global_step)
 
-                if self.scheduler_update_every_step:
-                    pbar.set_description(f"loss={loss_val:.4f} ({total_loss/self.local_step:.4f}), lr={self.optimizer.param_groups[0]['lr']:.6f}")
-                else:
-                    pbar.set_description(f"loss={loss_val:.4f} ({total_loss/self.local_step:.4f})")
-                pbar.update(loader.batch_size)
+                if self._train_progress is not None:
+                    self._train_progress.set_description_str(
+                        f'Epoch {self.epoch}/{self._train_max_epochs}',
+                        refresh=False,
+                    )
+                    progress_values = {
+                        'loss': f'{loss_val:.4f}',
+                        'avg': f'{total_loss / self.local_step:.4f}',
+                    }
+                    if self.scheduler_update_every_step:
+                        progress_values['lr'] = (
+                            f'{self.optimizer.param_groups[0]["lr"]:.6f}'
+                        )
+                    self._train_progress.set_postfix(
+                        progress_values,
+                        refresh=False,
+                    )
+                    self._train_progress.update(1)
 
         if self.ema is not None:
             self.ema.update()
@@ -2361,7 +2397,6 @@ class Trainer(object):
         self.stats["loss"].append(average_loss)
 
         if self.local_rank == 0:
-            pbar.close()
             if self.report_metric_at_train:
                 for metric in self.metrics:
                     self.log(metric.report(), style="red")
@@ -2374,9 +2409,6 @@ class Trainer(object):
                 self.lr_scheduler.step(average_loss)
             else:
                 self.lr_scheduler.step()
-
-        self.log(f"==> Finished Epoch {self.epoch}.")
-
 
     def evaluate_one_epoch(self, loader, name=None, type=None):
         self.log(f"++> Evaluate at epoch {self.epoch} ...")

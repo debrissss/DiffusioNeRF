@@ -45,6 +45,7 @@ __pycache__/
 **/build/
 *.egg-info/
 *.so
+.runtime/
 
 # 本地编辑器和系统文件
 .vscode/

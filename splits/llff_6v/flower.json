@@ -1,0 +1,10 @@
+{
+  "dataset": "LLFF",
+  "scene": "flower",
+  "protocol": "llff_holdout8_uniform6_v1",
+  "index_basis": "zero-based transforms.json frame order",
+  "frame_count": 34,
+  "train_ids": [1, 7, 13, 20, 26, 33],
+  "val_ids": [0],
+  "test_ids": [0, 8, 16, 24, 32]
+}

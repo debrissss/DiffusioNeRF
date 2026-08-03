@@ -26,10 +26,7 @@ METRICS = {
     'lpips_alex': 'min',
     'ssim': 'max',
 }
-WORKSPACE_SUFFIX = os.path.join(
-    'few_shot3',
-    'test_DiffusioNeRF_NeurTV_Ray_30k_seed0',
-)
+WORKSPACE_PREFIX = 'test_DiffusioNeRF_NeurTV_Ray_'
 
 
 def atomic_write_text(path, text):
@@ -66,14 +63,59 @@ def sha256_file(path):
     return digest.hexdigest()
 
 
-def load_scene(repo_root, scene, step):
-    workspace = os.path.join(
+def workspace_candidates(repo_root, scene):
+    scene_root = os.path.join(
         repo_root,
         'test_LLFF',
         f'test_{scene}',
-        WORKSPACE_SUFFIX,
+        'few_shot3',
     )
-    archive = os.path.join(workspace, 'evaluation', f'step_{step:06d}')
+    preferred = os.path.join(scene_root, 'test_DiffusioNeRF_NeurTV_Ray_30k_seed0')
+    candidates = [preferred]
+    if not os.path.isdir(scene_root):
+        return candidates
+
+    for name in sorted(os.listdir(scene_root)):
+        if name == os.path.basename(preferred):
+            continue
+        if not name.startswith(WORKSPACE_PREFIX) or '_backup_' in name:
+            continue
+        candidate = os.path.join(scene_root, name)
+        if os.path.isdir(candidate):
+            candidates.append(candidate)
+    return candidates
+
+
+def load_scene(repo_root, scene, step):
+    archive = None
+    missing = []
+    for workspace in workspace_candidates(repo_root, scene):
+        candidate_archive = os.path.join(
+            workspace,
+            'evaluation',
+            f'step_{step:06d}',
+        )
+        candidate_required = [
+            os.path.join(candidate_archive, 'COMPLETE'),
+            os.path.join(candidate_archive, 'manifest.json'),
+            os.path.join(candidate_archive, 'comparison.json'),
+        ]
+        for variant in VARIANTS:
+            candidate_required.append(
+                os.path.join(candidate_archive, variant, 'metrics.json')
+            )
+        candidate_missing = [
+            path for path in candidate_required if not os.path.isfile(path)
+        ]
+        if not candidate_missing:
+            archive = candidate_archive
+            break
+        if not missing:
+            missing = candidate_missing
+
+    if archive is None:
+        return None, missing
+
     required = [
         os.path.join(archive, 'COMPLETE'),
         os.path.join(archive, 'manifest.json'),

@@ -57,9 +57,6 @@ fi
 TARGET_STEP="${STOP_AT_STEP:-30000}"
 printf -v TARGET_STEP_PADDED '%06d' "$TARGET_STEP"
 
-# Default order follows the staged execution plan: validate representative
-# scenes first, then complete the remaining four scenes. Pass scene names as
-# positional arguments to run a subset, for example: ./run_...sh fern room
 if (( $# > 0 )); then
     SCENES=("$@")
 else
@@ -95,9 +92,17 @@ for SCENE in "${SCENES[@]}"; do
     fi
 
     DATASET="$REPO_DIR/data/nerf_llff_data/$SCENE"
-    SPLIT_FILE="$REPO_DIR/splits/llff_3v/$SCENE.json"
-    WORKSPACE="$REPO_DIR/test_LLFF/test_$SCENE/few_shot3/test_DiffusioNeRF_NeurTV_Ray_30k_seed0"
+    SPLIT_FILE="$REPO_DIR/splits/llff_6v/$SCENE.json"
+    WORKSPACE="$REPO_DIR/test_LLFF/test_$SCENE/few_shot6/test_DiffusioNeRF_NeurTV_Ray_30k_seed0"
 
+    if [[ ! -f "$DATASET/transforms.json" ]]; then
+        echo "LLFF transforms.json is missing: $DATASET/transforms.json" >&2
+        exit 2
+    fi
+    if [[ ! -f "$SPLIT_FILE" ]]; then
+        echo "LLFF standard 6-view split is missing: $SPLIT_FILE" >&2
+        exit 2
+    fi
     if [[ "$CKPT_MODE" == "scratch" ]] \
         && [[ -n "$(find "$WORKSPACE/checkpoints" -type f -name '*.pth' -print -quit 2>/dev/null)" ]]; then
         echo "Refusing scratch mode because checkpoints already exist: $WORKSPACE" >&2
@@ -105,7 +110,7 @@ for SCENE in "${SCENES[@]}"; do
         exit 2
     fi
 
-    echo "Starting LLFF 3-view NeurTV + virtual-ray experiment: $SCENE"
+    echo "Starting standard LLFF 6-view NeurTV + virtual-ray experiment: $SCENE"
     echo "Checkpoint mode: $CKPT_MODE; stop_at_step: ${STOP_AT_STEP:-full 30000}"
     echo "Protected milestone steps: ${MILESTONE_STEPS_SPEC:-disabled}"
 
@@ -113,7 +118,7 @@ for SCENE in "${SCENES[@]}"; do
         "$DATASET" \
         --workspace "$WORKSPACE" \
         --split_file "$SPLIT_FILE" \
-        --few_shot 3 \
+        --few_shot 6 \
         --seed 0 \
         --ckpt "$CKPT_MODE" \
         "${MODE_ARGS[@]}" \
@@ -133,7 +138,7 @@ for SCENE in "${SCENES[@]}"; do
         --downscale 8 \
         --scale "${SCALE[$SCENE]}" \
         --bound "${BOUND[$SCENE]}" \
-        --dataset_name "$SCENE 3-views" \
+        --dataset_name "$SCENE 6-views" \
         --implementation_name "DiffusioNeRF+NeurTV+Ray" \
         --diff_reg \
         --loss_dist \

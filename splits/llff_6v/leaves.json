@@ -1,0 +1,10 @@
+{
+  "dataset": "LLFF",
+  "scene": "leaves",
+  "protocol": "llff_holdout8_uniform6_v1",
+  "index_basis": "zero-based transforms.json frame order",
+  "frame_count": 26,
+  "train_ids": [1, 5, 10, 15, 20, 25],
+  "val_ids": [0],
+  "test_ids": [0, 8, 16, 24]
+}

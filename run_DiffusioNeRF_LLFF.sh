@@ -1,5 +1,9 @@
  #!/bin/bash
 
+REPO_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+cd "$REPO_DIR"
+source "$REPO_DIR/scripts/runtime_env.sh"
+
 ###parameters for the scenes
 
 ##LLFF 训练迭代次数与后面的 few-shot 设置对应，终端实际迭代次数ITERS除以三
@@ -38,7 +42,7 @@ do
 ### Run LLFF
 ###--diff_reg：启用扩散正则化（diffusion regularization）。--loss_dist：启用距离损失。--loss_fg：启用前景损失。--use_TVdepth：使用深度正则。
 ### training and test on the last checkpoint
-CUDA_VISIBLE_DEVICES=0 python main_nerf.py $DATASET --workspace ${WORK_BASE[i_shot]}/test_DiffusioNeRF --fp16 --few_shot ${FEW_SHOT[i_shot]} --scale ${SCALE[i_dataset]} --bound ${BOUND[i_dataset]} --dataset_name "${DATASET_NAME[i_shot]}" --implementation_name "DiffusioNeRF" --iters ${ITERS[i_shot]} --diff_reg --loss_dist --loss_fg --use_depth --diff_reg_start_iter ${DIFF_REG_START_ITER[i_shot]} --dist_lambda 2e-5 --fg_lambda 1e-4 --patch_size 4 --depth_reg_lambda 0.1 --use_nll_color --use_nll_sigma --fre_nll_color --smoothing --smoothing_lambda 0.00001 --smooth_sampling_method near_pixel
+CUDA_VISIBLE_DEVICES=0 "$PYTHON_BIN" main_nerf.py $DATASET --workspace ${WORK_BASE[i_shot]}/test_DiffusioNeRF --fp16 --few_shot ${FEW_SHOT[i_shot]} --scale ${SCALE[i_dataset]} --bound ${BOUND[i_dataset]} --dataset_name "${DATASET_NAME[i_shot]}" --implementation_name "DiffusioNeRF" --iters ${ITERS[i_shot]} --diff_reg --loss_dist --loss_fg --use_depth --diff_reg_start_iter ${DIFF_REG_START_ITER[i_shot]} --dist_lambda 2e-5 --fg_lambda 1e-4 --patch_size 4 --depth_reg_lambda 0.1 --use_nll_color --use_nll_sigma --fre_nll_color --smoothing --smoothing_lambda 0.00001 --smooth_sampling_method near_pixel
 
 
 done
