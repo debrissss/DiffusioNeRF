@@ -147,7 +147,7 @@ class NeRFRenderer(nn.Module):
     #def run(self, rays_o, rays_d, cam_id=None, num_steps=128, upsample_steps=128, bg_color=None, perturb=False, adv_perturb={}, num_rays=4096, current_iter=None, total_iter=None, start_ptr=1, **kwargs): 新增1
     def run(self, rays_o, rays_d, cam_id=None, num_steps=128, upsample_steps=128, bg_color=None,
             perturb=False, adv_perturb={}, num_rays=4096, current_iter=None, total_iter=None,
-            start_ptr=1, return_intermediates=False, **kwargs): 
+            start_ptr=1, return_intermediates=False, geometry_only=False, **kwargs):
         
         # rays_o, rays_d: [B, N, 3], assumes B == 1
         # bg_color: [3] in range [0, 1]
@@ -279,6 +279,26 @@ class NeRFRenderer(nn.Module):
         alphas = 1 - torch.exp(-deltas * self.density_scale * density_outputs['sigma'].squeeze(-1)) # [N, T+t]
         alphas_shifted = torch.cat([torch.ones_like(alphas[..., :1]), 1 - alphas + 1e-15], dim=-1) # [N, T+t+1]
         weights = alphas * torch.cumprod(alphas_shifted, dim=-1)[..., :-1] # [N, T+t]
+
+        # Virtual-ray screening and depth supervision consume only geometry.
+        # All density sampling, weight, depth, gradient, and RNG operations are
+        # unchanged; avoid the unused direction encoder and RGB MLP below.
+        if geometry_only:
+            weights_sum = weights.sum(dim=-1)
+            ori_z_vals = ((z_vals - nears) / (fars - nears + 1e-5)).clamp(0, 1)
+            depth = torch.sum(weights * ori_z_vals, dim=-1).view(*prefix)
+            result = {'depth': depth, 'weights_sum': weights_sum}
+            if return_intermediates:
+                result['weights'] = weights
+                result['z_vals'] = z_vals
+                result['xyzs'] = xyzs
+            if kwargs.get('entropy') or kwargs.get('smoothing'):
+                result['alpha'] = alphas
+                result['weights'] = weights
+            if kwargs.get('diff_reg'):
+                result['z_vals'] = z_vals
+                result['weights'] = weights
+            return result
 
         dirs = rays_d.view(-1, 1, 3).expand_as(xyzs)
         for k, v in density_outputs.items():

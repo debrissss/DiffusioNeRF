@@ -366,6 +366,7 @@ class LPIPSMeter:
 class Trainer(object):
     _RESUME_CONFIG_IGNORED_KEYS = {
         'ckpt',
+        'checkpoint_interval_steps',
         'dataset_name',
         'eval_expected_step',
         'eval_output_dir',
@@ -375,6 +376,8 @@ class Trainer(object):
         'gui',
         'implementation_name',
         'milestone_steps',
+        'profile_report_steps',
+        'profile_training',
         'stop_at_step',
         'test',
         'workspace',
@@ -478,6 +481,14 @@ class Trainer(object):
         self.milestone_steps = frozenset(
             int(step) for step in getattr(self.opt, 'milestone_steps', [])
         )
+        self._profile_enabled = bool(
+            getattr(self.opt, 'profile_training', False)
+            and self.local_rank == 0
+            and self.device.type == 'cuda'
+        )
+        self._profile_cpu = {}
+        self._profile_cuda_events = {}
+        self._profile_window_step = self.global_step
         self.stats = {
             "loss": [],
             "valid_loss": [],
@@ -562,6 +573,70 @@ class Trainer(object):
             if self.log_ptr: 
                 print(*args, file=self.log_ptr)
                 self.log_ptr.flush() # write immediately to file
+
+    def _profile_begin(self, name):
+        if not self._profile_enabled:
+            return None
+        start_event = torch.cuda.Event(enable_timing=True)
+        end_event = torch.cuda.Event(enable_timing=True)
+        start_event.record()
+        return name, time.perf_counter(), start_event, end_event
+
+    def _profile_end(self, token):
+        if token is None:
+            return
+        name, cpu_start, start_event, end_event = token
+        end_event.record()
+        cpu_seconds, calls = self._profile_cpu.get(name, (0.0, 0))
+        self._profile_cpu[name] = (
+            cpu_seconds + time.perf_counter() - cpu_start,
+            calls + 1,
+        )
+        self._profile_cuda_events.setdefault(name, []).append(
+            (start_event, end_event)
+        )
+
+    @contextmanager
+    def _profile_phase(self, name):
+        token = self._profile_begin(name)
+        try:
+            yield
+        finally:
+            self._profile_end(token)
+
+    def _profile_report(self):
+        if not self._profile_enabled:
+            return
+        torch.cuda.synchronize()
+        cuda_seconds = {
+            name: sum(start.elapsed_time(end) for start, end in events) / 1000.0
+            for name, events in self._profile_cuda_events.items()
+        }
+        window_steps = self.global_step - self._profile_window_step
+        step_cuda = cuda_seconds.get('step_total', 0.0)
+        step_cpu = self._profile_cpu.get('step_total', (0.0, 0))[0]
+        self.log(
+            f'[PROFILE] steps={self._profile_window_step}->{self.global_step} '
+            f'count={window_steps} step_cuda={step_cuda:.6f}s '
+            f'step_cpu={step_cpu:.6f}s'
+        )
+        for name in sorted(cuda_seconds, key=cuda_seconds.get, reverse=True):
+            if name == 'step_total':
+                continue
+            cpu_total, calls = self._profile_cpu.get(name, (0.0, 0))
+            cuda_total = cuda_seconds[name]
+            share = 100.0 * cuda_total / step_cuda if step_cuda > 0 else 0.0
+            cuda_ms_per_step = (
+                1000.0 * cuda_total / window_steps if window_steps > 0 else 0.0
+            )
+            self.log(
+                f'[PROFILE] phase={name} calls={calls} '
+                f'cuda={cuda_total:.6f}s cpu={cpu_total:.6f}s '
+                f'cuda_ms/step={cuda_ms_per_step:.3f} share={share:.2f}%'
+            )
+        self._profile_cpu.clear()
+        self._profile_cuda_events.clear()
+        self._profile_window_step = self.global_step
 
     @staticmethod
     def _atomic_torch_save(state, file_path):
@@ -780,7 +855,8 @@ class Trainer(object):
     def _optimize_with_amp_retry(self, closure):
         """Run one optimizer update, retrying the same stochastic batch after AMP overflow."""
         max_retries = getattr(self.opt, 'amp_max_retries', 4)
-        retry_rng_state = self._capture_rng_state()
+        with self._profile_phase('rng_snapshot'):
+            retry_rng_state = self._capture_rng_state()
 
         for attempt in range(max_retries + 1):
             if attempt > 0:
@@ -788,20 +864,23 @@ class Trainer(object):
 
             self.optimizer.zero_grad()
 
-            with torch.cuda.amp.autocast(enabled=self.fp16):
-                preds, truths, loss = closure()
+            with self._profile_phase('forward'):
+                with torch.cuda.amp.autocast(enabled=self.fp16):
+                    preds, truths, loss = closure()
 
-            if not torch.isfinite(loss).all():
-                raise FloatingPointError(
-                    f'Non-finite forward loss at global step {self.global_step}; '
-                    'AMP scale reduction cannot repair a non-finite forward pass.'
-                )
+            with self._profile_phase('finite_check'):
+                if not torch.isfinite(loss).all():
+                    raise FloatingPointError(
+                        f'Non-finite forward loss at global step {self.global_step}; '
+                        'AMP scale reduction cannot repair a non-finite forward pass.'
+                    )
 
-            scale_before = self.scaler.get_scale()
-            self.scaler.scale(loss).backward()
-            self.scaler.step(self.optimizer)
-            self.scaler.update()
-            scale_after = self.scaler.get_scale()
+            with self._profile_phase('backward_optimizer'):
+                scale_before = self.scaler.get_scale()
+                self.scaler.scale(loss).backward()
+                self.scaler.step(self.optimizer)
+                self.scaler.update()
+                scale_after = self.scaler.get_scale()
 
             # GradScaler skips optimizer.step() and reduces its scale when a
             # gradient overflow is found. Replay the same stochastic batch so
@@ -971,16 +1050,17 @@ class Trainer(object):
             
 
 
-        outputs_clean = self.model.render(
-            rays_o, rays_d,
-            staged=False,
-            bg_color=bg_color,
-            perturb=True,
-            force_all_rays=False if self.opt.patch_size == 1 else True,
-            current_iter=current_iter,
-            total_iter=total_iter,
-            **vars(self.opt)
-        )  # without adv
+        with self._profile_phase('main_render'):
+            outputs_clean = self.model.render(
+                rays_o, rays_d,
+                staged=False,
+                bg_color=bg_color,
+                perturb=True,
+                force_all_rays=False if self.opt.patch_size == 1 else True,
+                current_iter=current_iter,
+                total_iter=total_iter,
+                **vars(self.opt)
+            )  # without adv
 
         pred_rgb_clean = outputs_clean['image'][:, :self.opt.num_rays]
         # MSE loss
@@ -1004,21 +1084,22 @@ class Trainer(object):
                 'perturb', 'adv_perturb'
             ]:
                 render_kwargs.pop(k, None)
-            # 原始射线先拿到中间量
-            coarse_outputs = self.model.run(
-                rays_o, rays_d,
-                cam_id=data.get('cam_id', None),
-                num_steps=self.opt.num_steps,
-                upsample_steps=self.opt.upsample_steps,
-                bg_color=None,
-                perturb=True,
-                adv_perturb={},
-                current_iter=current_iter,
-                total_iter=total_iter,
-                start_ptr=1,
-                return_intermediates=True,
-                **render_kwargs
-            )
+            with self._profile_phase('virtual_original_render'):
+                coarse_outputs = self.model.run(
+                    rays_o, rays_d,
+                    cam_id=data.get('cam_id', None),
+                    num_steps=self.opt.num_steps,
+                    upsample_steps=self.opt.upsample_steps,
+                    bg_color=None,
+                    perturb=True,
+                    adv_perturb={},
+                    current_iter=current_iter,
+                    total_iter=total_iter,
+                    start_ptr=1,
+                    return_intermediates=True,
+                    geometry_only=True,
+                    **render_kwargs
+                )
 
             orig_weights = coarse_outputs['weights'].detach()   # [M, T]
             orig_z_vals = coarse_outputs['z_vals'].detach()     # [M, T]
@@ -1028,56 +1109,16 @@ class Trainer(object):
 
             # generate K virtual rays per original ray
             virtual_k = self.opt.virtual_ray_k
-            O_prime, d_prime, P_s, _ = self.build_virtual_rays(
-                rays_o, rays_d, orig_z_vals, orig_weights, K=virtual_k
-            )  # O_prime/d_prime: [M*K, 3], P_s: [M, 3]
+            with self._profile_phase('virtual_build'):
+                O_prime, d_prime, P_s, _ = self.build_virtual_rays(
+                    rays_o, rays_d, orig_z_vals, orig_weights, K=virtual_k
+                )  # O_prime/d_prime: [M*K, 3], P_s: [M, 3]
 
             # render virtual rays
-            virtual_outputs = self.model.run(
-                O_prime.unsqueeze(0),   # [1, M*K, 3]
-                d_prime.unsqueeze(0),   # [1, M*K, 3]
-                cam_id=None,
-                num_steps=self.opt.num_steps,
-                upsample_steps=self.opt.upsample_steps,
-                bg_color=None,
-                perturb=True,
-                adv_perturb={},
-                current_iter=current_iter,
-                total_iter=total_iter,
-                start_ptr=1,
-                return_intermediates=True,
-                **render_kwargs
-            )
-
-            virtual_weights = virtual_outputs['weights'].detach()   # [M*K, T]
-            virtual_weights = virtual_weights.reshape(-1, virtual_k, virtual_weights.shape[-1])  # [M, K, T]
-            virtual_q = virtual_weights / (virtual_weights.sum(dim=-1, keepdim=True) + 1e-8)    # [M, K, T]
-
-            # JSD(p || q)
-            orig_p_rep = orig_p[:, None, :].expand_as(virtual_q)  # [M, K, T]
-            eps = 1e-8
-            m = 0.5 * (orig_p_rep + virtual_q)
-            jsd = 0.5 * (
-                (orig_p_rep * (torch.log(orig_p_rep + eps) - torch.log(m + eps))).sum(dim=-1) +
-                (virtual_q * (torch.log(virtual_q + eps) - torch.log(m + eps))).sum(dim=-1)
-            )  # [M, K]
-
-            mask = jsd < self.opt.virtual_ray_jsd_th   # [M, K]
-
-            # 保留下来的虚拟射线
-            mask_flat = mask.reshape(-1)  # [M*K]
-            if mask_flat.any():
-                selected_O = O_prime[mask_flat]       # [Ns, 3]
-                selected_d = d_prime[mask_flat]       # [Ns, 3]
-
-                # 对应的 P_s 也展开到每个虚拟射线
-                P_s_rep = P_s[:, None, :].expand(-1, virtual_k, -1).reshape(-1, 3)
-                selected_Ps = P_s_rep[mask_flat]      # [Ns, 3]
-
-                # 再渲染保留的虚拟射线
-                selected_outputs = self.model.run(
-                    selected_O.unsqueeze(0),   # [1, Ns, 3]
-                    selected_d.unsqueeze(0),   # [1, Ns, 3]
+            with self._profile_phase('virtual_screen_render'):
+                virtual_outputs = self.model.run(
+                    O_prime.unsqueeze(0),   # [1, M*K, 3]
+                    d_prime.unsqueeze(0),   # [1, M*K, 3]
                     cam_id=None,
                     num_steps=self.opt.num_steps,
                     upsample_steps=self.opt.upsample_steps,
@@ -1087,9 +1128,55 @@ class Trainer(object):
                     current_iter=current_iter,
                     total_iter=total_iter,
                     start_ptr=1,
-                    return_intermediates=False,
+                    return_intermediates=True,
+                    geometry_only=True,
                     **render_kwargs
                 )
+
+            with self._profile_phase('virtual_jsd_mask'):
+                virtual_weights = virtual_outputs['weights'].detach()   # [M*K, T]
+                virtual_weights = virtual_weights.reshape(-1, virtual_k, virtual_weights.shape[-1])  # [M, K, T]
+                virtual_q = virtual_weights / (virtual_weights.sum(dim=-1, keepdim=True) + 1e-8)    # [M, K, T]
+
+                # JSD(p || q)
+                orig_p_rep = orig_p[:, None, :].expand_as(virtual_q)  # [M, K, T]
+                eps = 1e-8
+                m = 0.5 * (orig_p_rep + virtual_q)
+                jsd = 0.5 * (
+                    (orig_p_rep * (torch.log(orig_p_rep + eps) - torch.log(m + eps))).sum(dim=-1) +
+                    (virtual_q * (torch.log(virtual_q + eps) - torch.log(m + eps))).sum(dim=-1)
+                )  # [M, K]
+
+                mask = jsd < self.opt.virtual_ray_jsd_th   # [M, K]
+
+                # 保留下来的虚拟射线
+                mask_flat = mask.reshape(-1)  # [M*K]
+            if mask_flat.any():
+                selected_O = O_prime[mask_flat]       # [Ns, 3]
+                selected_d = d_prime[mask_flat]       # [Ns, 3]
+
+                # 对应的 P_s 也展开到每个虚拟射线
+                P_s_rep = P_s[:, None, :].expand(-1, virtual_k, -1).reshape(-1, 3)
+                selected_Ps = P_s_rep[mask_flat]      # [Ns, 3]
+
+                # 再渲染保留的虚拟射线
+                with self._profile_phase('virtual_selected_render'):
+                    selected_outputs = self.model.run(
+                        selected_O.unsqueeze(0),   # [1, Ns, 3]
+                        selected_d.unsqueeze(0),   # [1, Ns, 3]
+                        cam_id=None,
+                        num_steps=self.opt.num_steps,
+                        upsample_steps=self.opt.upsample_steps,
+                        bg_color=None,
+                        perturb=True,
+                        adv_perturb={},
+                        current_iter=current_iter,
+                        total_iter=total_iter,
+                        start_ptr=1,
+                        return_intermediates=False,
+                        geometry_only=True,
+                        **render_kwargs
+                    )
 
                 pred_depth_virtual = selected_outputs['depth'].reshape(-1)  # [Ns]
                 target_depth_virtual = torch.norm(selected_O - selected_Ps, dim=-1)  # [Ns]
@@ -1154,13 +1241,14 @@ class Trainer(object):
                 or self.global_step <= self.opt.neurtv_end_iter
             )
         ):
-            tv_loss = self.compute_neurtv_loss(
-                self.model,
-                bound=self.opt.bound,
-                num_samples=self.opt.neurtv_num_samples,
-                device=self.device,
-                fd_epsilon=self.opt.neurtv_fd_epsilon
-            )
+            with self._profile_phase('neurtv'):
+                tv_loss = self.compute_neurtv_loss(
+                    self.model,
+                    bound=self.opt.bound,
+                    num_samples=self.opt.neurtv_num_samples,
+                    device=self.device,
+                    fd_epsilon=self.opt.neurtv_fd_epsilon
+                )
             loss = loss + self.opt.neurtv_lambda * tv_loss
 
             # 记录到日志
@@ -1177,7 +1265,8 @@ class Trainer(object):
                 #loss_dist
                 if self.opt.use_depth:
                     depth = outputs_clean['depth']
-                loss_dist = self.distortion_loss(z_vals, weights, depth)
+                with self._profile_phase('distortion_loss'):
+                    loss_dist = self.distortion_loss(z_vals, weights, depth)
                 loss = loss + loss_dist * self.opt.dist_lambda
 
             #loss_fg
@@ -1209,7 +1298,8 @@ class Trainer(object):
         smoothing_lambda = self.opt.smoothing_lambda * self.opt.smoothing_rate ** (int(self.global_step / self.opt.smoothing_step_size))
 
         if self.opt.smoothing:
-            smoothing_loss = self.fun_KL_divergence_loss(outputs_clean['weights'])
+            with self._profile_phase('smoothing_loss'):
+                smoothing_loss = self.fun_KL_divergence_loss(outputs_clean['weights'])
             if self.opt.smoothing_end_iter is not None:
                 if self.global_step > self.opt.smoothing_end_iter:
                     smoothing_loss = 0
@@ -1393,6 +1483,10 @@ class Trainer(object):
                 f'global_step={self.global_step} exceeds the training target '
                 f'{target_global_step}'
             )
+        if self._profile_enabled:
+            self._profile_cpu.clear()
+            self._profile_cuda_events.clear()
+            self._profile_window_step = self.global_step
 
         self._train_max_epochs = max_epochs
         self._train_progress = None
@@ -1411,18 +1505,68 @@ class Trainer(object):
             )
 
         try:
+            perf_window_start = time.perf_counter()
+            perf_window_step = self.global_step
+            perf_train_seconds = 0.0
+            perf_checkpoint_seconds = 0.0
+            perf_validation_seconds = 0.0
             for epoch in range(self.epoch + 1, max_epochs + 1):
                 self.epoch = epoch
 
+                phase_start = time.perf_counter()
                 self.train_one_epoch(train_loader)
+                perf_train_seconds += time.perf_counter() - phase_start
 
-                if self.workspace is not None and self.local_rank == 0:
+                profile_report_due = (
+                    self._profile_enabled
+                    and (
+                        self.global_step == target_global_step
+                        or self.global_step - self._profile_window_step
+                        >= self.opt.profile_report_steps
+                    )
+                )
+                if profile_report_due:
+                    self._profile_report()
+
+                checkpoint_due = (
+                    self.global_step == target_global_step
+                    or self.global_step in self.milestone_steps
+                    or self.global_step % self.opt.checkpoint_interval_steps == 0
+                )
+                if (
+                    checkpoint_due
+                    and self.workspace is not None
+                    and self.local_rank == 0
+                ):
+                    phase_start = time.perf_counter()
                     self.save_checkpoint(full=True, best=False)
                     self.save_milestone_checkpoint()
+                    perf_checkpoint_seconds += time.perf_counter() - phase_start
 
                 if self.epoch % self.eval_interval == 0:
+                    phase_start = time.perf_counter()
                     self.evaluate_one_epoch(valid_loader)
                     self.save_checkpoint(full=False, best=True)
+                    perf_validation_seconds += time.perf_counter() - phase_start
+
+                if checkpoint_due and self.local_rank == 0:
+                    window_seconds = time.perf_counter() - perf_window_start
+                    window_steps = self.global_step - perf_window_step
+                    throughput = (
+                        window_steps / window_seconds if window_seconds > 0 else 0.0
+                    )
+                    self.log(
+                        f'[PERF] steps={perf_window_step}->{self.global_step} '
+                        f'wall={window_seconds:.3f}s train={perf_train_seconds:.3f}s '
+                        f'checkpoint={perf_checkpoint_seconds:.3f}s '
+                        f'validation={perf_validation_seconds:.3f}s '
+                        f'throughput={throughput:.3f} step/s'
+                    )
+                    perf_window_start = time.perf_counter()
+                    perf_window_step = self.global_step
+                    perf_train_seconds = 0.0
+                    perf_checkpoint_seconds = 0.0
+                    perf_validation_seconds = 0.0
         finally:
             if self._train_progress is not None:
                 self._train_progress.close()
@@ -2296,7 +2440,10 @@ class Trainer(object):
         return perturb_sizes, epsilons, alphas, iters, norms
 
     def train_one_epoch(self, loader):
-        total_loss = 0
+        # Match the old Python-float accumulation order while avoiding a
+        # device synchronization at every step. One scalar is transferred at
+        # the epoch boundary instead (six steps for LLFF 6-view).
+        total_loss = torch.zeros((), device=self.device, dtype=torch.float64)
         if self.local_rank == 0 and self.report_metric_at_train:
             for metric in self.metrics:
                 metric.clear()
@@ -2311,7 +2458,12 @@ class Trainer(object):
         self.local_step = 0
 
         num_cameras = loader._data.images.shape[0]
-        for data in loader:
+        loader_iterator = iter(loader)
+        for _ in range(len(loader)):
+            profile_token = self._profile_begin('data_prepare')
+            data = next(loader_iterator)
+            self._profile_end(profile_token)
+            step_profile_token = self._profile_begin('step_total')
             # update grid every 16 steps
             if self.model.cuda_ray and self.global_step % self.opt.update_extra_interval == 0:
                 with torch.cuda.amp.autocast(enabled=self.fp16):
@@ -2357,10 +2509,10 @@ class Trainer(object):
             )
 
             if self.scheduler_update_every_step:
-                self.lr_scheduler.step()
+                with self._profile_phase('lr_scheduler'):
+                    self.lr_scheduler.step()
 
-            loss_val = loss.item()
-            total_loss += loss_val
+            total_loss.add_(loss.detach().to(dtype=torch.float64))
 
             if self.local_rank == 0:
                 if self.report_metric_at_train:
@@ -2368,7 +2520,6 @@ class Trainer(object):
                         metric.update(preds, truths)
                         
                 if self.use_tensorboardX:
-                    self.writer.add_scalar("train/loss", loss_val, self.global_step)
                     self.writer.add_scalar("train/lr", self.optimizer.param_groups[0]['lr'], self.global_step)
 
                 if self._train_progress is not None:
@@ -2376,27 +2527,30 @@ class Trainer(object):
                         f'Epoch {self.epoch}/{self._train_max_epochs}',
                         refresh=False,
                     )
-                    progress_values = {
-                        'loss': f'{loss_val:.4f}',
-                        'avg': f'{total_loss / self.local_step:.4f}',
-                    }
-                    if self.scheduler_update_every_step:
-                        progress_values['lr'] = (
-                            f'{self.optimizer.param_groups[0]["lr"]:.6f}'
-                        )
-                    self._train_progress.set_postfix(
-                        progress_values,
-                        refresh=False,
-                    )
                     self._train_progress.update(1)
+            self._profile_end(step_profile_token)
 
         if self.ema is not None:
-            self.ema.update()
+            with self._profile_phase('ema_update'):
+                self.ema.update()
 
-        average_loss = total_loss / self.local_step
+        with self._profile_phase('epoch_loss_sync'):
+            average_loss = total_loss.item() / self.local_step
         self.stats["loss"].append(average_loss)
 
         if self.local_rank == 0:
+            if self.use_tensorboardX:
+                self.writer.add_scalar("train/loss", average_loss, self.global_step)
+            if self._train_progress is not None:
+                progress_values = {'avg_loss': f'{average_loss:.4f}'}
+                if self.scheduler_update_every_step:
+                    progress_values['lr'] = (
+                        f'{self.optimizer.param_groups[0]["lr"]:.6f}'
+                    )
+                self._train_progress.set_postfix(
+                    progress_values,
+                    refresh=False,
+                )
             if self.report_metric_at_train:
                 for metric in self.metrics:
                     self.log(metric.report(), style="red")

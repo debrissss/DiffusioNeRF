@@ -8,11 +8,11 @@ source "$REPO_DIR/scripts/runtime_env.sh"
 
 GPU_ID="${GPU_ID:-0}"
 CKPT_MODE="${CKPT_MODE:-latest}"
-CHECKPOINT_INTERVAL_STEPS="${CHECKPOINT_INTERVAL_STEPS:-300}"
+CHECKPOINT_INTERVAL_STEPS="${CHECKPOINT_INTERVAL_STEPS:-297}"
 PROFILE_TRAINING="${PROFILE_TRAINING:-0}"
 PROFILE_REPORT_STEPS="${PROFILE_REPORT_STEPS:-300}"
 STOP_AT_STEP="${STOP_AT_STEP:-}"
-MILESTONE_STEPS_SPEC="${MILESTONE_STEPS-6000 9000 12000 18000 24000 27000}"
+MILESTONE_STEPS_SPEC="${MILESTONE_STEPS-6003 9000 11997 18000 24003 27000}"
 EVAL_OVERWRITE="${EVAL_OVERWRITE:-0}"
 EVAL_ONLY="${EVAL_ONLY:-0}"
 
@@ -73,7 +73,7 @@ PROFILE_ARGS=()
 if [[ "$PROFILE_TRAINING" == "1" ]]; then
     PROFILE_ARGS=(--profile_training --profile_report_steps "$PROFILE_REPORT_STEPS")
 fi
-TARGET_STEP="${STOP_AT_STEP:-30000}"
+TARGET_STEP="${STOP_AT_STEP:-29997}"
 printf -v TARGET_STEP_PADDED '%06d' "$TARGET_STEP"
 
 if (( $# > 0 )); then
@@ -111,15 +111,15 @@ for SCENE in "${SCENES[@]}"; do
     fi
 
     DATASET="$REPO_DIR/data/nerf_llff_data/$SCENE"
-    SPLIT_FILE="$REPO_DIR/splits/llff_6v/$SCENE.json"
-    WORKSPACE="$REPO_DIR/test_LLFF/test_$SCENE/few_shot6/test_DiffusioNeRF_NeurTV_Ray_30k_seed0"
+    SPLIT_FILE="$REPO_DIR/splits/llff_9v/$SCENE.json"
+    WORKSPACE="$REPO_DIR/test_LLFF/test_$SCENE/few_shot9/test_DiffusioNeRF_NeurTV_Ray_30k_seed0"
 
     if [[ ! -f "$DATASET/transforms.json" ]]; then
         echo "LLFF transforms.json is missing: $DATASET/transforms.json" >&2
         exit 2
     fi
     if [[ ! -f "$SPLIT_FILE" ]]; then
-        echo "LLFF standard 6-view split is missing: $SPLIT_FILE" >&2
+        echo "LLFF standard 9-view split is missing: $SPLIT_FILE" >&2
         exit 2
     fi
     if [[ "$CKPT_MODE" == "scratch" ]] \
@@ -129,22 +129,22 @@ for SCENE in "${SCENES[@]}"; do
         exit 2
     fi
 
-    echo "Starting standard LLFF 6-view NeurTV + virtual-ray experiment: $SCENE"
-    echo "Checkpoint mode: $CKPT_MODE; stop_at_step: ${STOP_AT_STEP:-full 30000}"
+    echo "Starting standard LLFF 9-view NeurTV + virtual-ray experiment: $SCENE"
+    echo "Checkpoint mode: $CKPT_MODE; stop_at_step: ${STOP_AT_STEP:-full 29997}"
     echo "Protected milestone steps: ${MILESTONE_STEPS_SPEC:-disabled}"
 
     CUDA_VISIBLE_DEVICES="$GPU_ID" NO_GUI=1 "$PYTHON_BIN" main_nerf.py \
         "$DATASET" \
         --workspace "$WORKSPACE" \
         --split_file "$SPLIT_FILE" \
-        --few_shot 6 \
+        --few_shot 9 \
         --seed 0 \
         --ckpt "$CKPT_MODE" \
         --checkpoint_interval_steps "$CHECKPOINT_INTERVAL_STEPS" \
         "${PROFILE_ARGS[@]}" \
         "${MODE_ARGS[@]}" \
         --fp16 \
-        --iters 30000 \
+        --iters 29997 \
         "${STOP_ARGS[@]}" \
         "${MILESTONE_ARGS[@]}" \
         --eval_variants raw ema \
@@ -159,7 +159,7 @@ for SCENE in "${SCENES[@]}"; do
         --downscale 8 \
         --scale "${SCALE[$SCENE]}" \
         --bound "${BOUND[$SCENE]}" \
-        --dataset_name "$SCENE 6-views" \
+        --dataset_name "$SCENE 9-views" \
         --implementation_name "DiffusioNeRF+NeurTV+Ray" \
         --diff_reg \
         --loss_dist \

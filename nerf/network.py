@@ -224,7 +224,13 @@ class NeRFNetwork(NeRFRenderer):
 
         d = self.encoder_dir(d)
         if self.fre_nll_color and current_iter is not None and total_iter is not None:
-            mask2 = self.get_freq_mask(d.shape, current_iter, total_iter, start_ptr)
+            mask2 = self.get_freq_mask(
+                d.shape,
+                current_iter,
+                total_iter,
+                start_ptr,
+                device=d.device,
+            )
             d = d * mask2
         h = torch.cat([d, geo_feat], dim=-1)
 
@@ -261,11 +267,31 @@ class NeRFNetwork(NeRFRenderer):
         
         return params
 
-    def get_freq_mask(self, embedded_shape, current_iter, total_iter, start_ptr):
+    def get_freq_mask(
+        self,
+        embedded_shape,
+        current_iter,
+        total_iter,
+        start_ptr,
+        device=None,
+    ):
         if len(embedded_shape) == 2:
             embedded_shape = embedded_shape[1]
+
+        device = torch.device('cuda') if device is None else torch.device(device)
+        cache_key = (
+            int(embedded_shape),
+            int(current_iter),
+            int(total_iter),
+            float(start_ptr),
+            device,
+        )
+        cached = getattr(self, '_freq_mask_cache', None)
+        if cached is not None and cached[0] == cache_key:
+            return cached[1]
+
         if current_iter > total_iter:
-            return torch.ones(embedded_shape).cuda().float()
+            freq_mask = torch.ones(embedded_shape).to(device=device).float()
         else:
             alpha_t = np.zeros(embedded_shape)
             ptr = embedded_shape / 3 * current_iter / total_iter + start_ptr #era 1 3 5 7 ( -,+,++,+++)
@@ -273,7 +299,12 @@ class NeRFNetwork(NeRFRenderer):
             int_ptr = int(ptr)
             alpha_t[: int_ptr * 3] = 1.0
             alpha_t[int_ptr * 3: int_ptr * 3 + 3] = (ptr - int_ptr)
-            return torch.from_numpy(np.clip(np.array(alpha_t), 1e-8, 1 - 1e-8)).cuda().float()
+            freq_mask = torch.from_numpy(
+                np.clip(np.array(alpha_t), 1e-8, 1 - 1e-8)
+            ).to(device=device).float()
+
+        self._freq_mask_cache = (cache_key, freq_mask)
+        return freq_mask
 
 
 # from https://arxiv.org/pdf/2202.08345.pdf

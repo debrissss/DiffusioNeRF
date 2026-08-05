@@ -84,12 +84,25 @@ if __name__ == '__main__':
             'outside the rolling latest-checkpoint history'
         ),
     )
+    parser.add_argument(
+        '--checkpoint_interval_steps',
+        type=int,
+        default=300,
+        help=(
+            'global-step interval for rolling full resumable checkpoints; '
+            'milestones and the final target are always saved'
+        ),
+    )
     parser.add_argument('--lr', type=float, default=1e-2, help="initial learning rate")
     parser.add_argument('--ckpt', type=str, default='latest')
     parser.add_argument('--amp_max_retries', type=int, default=4,
                         help='maximum retries of the same batch after an FP16 gradient overflow')
     parser.add_argument('--detect_anomaly', action='store_true',
                         help='enable expensive autograd anomaly detection for debugging')
+    parser.add_argument('--profile_training', action='store_true',
+                        help='collect CPU/CUDA phase timings during training')
+    parser.add_argument('--profile_report_steps', type=int, default=300,
+                        help='successful optimizer steps per training profile report')
     parser.add_argument('--num_rays', type=int, default=4096, help="num rays sampled per image for each training step")
     parser.add_argument('--cuda_ray', action='store_true', help="use CUDA raymarching instead of pytorch")
     parser.add_argument('--max_steps', type=int, default=1024, help="max num steps sampled per ray (only valid when using --cuda_ray)")
@@ -290,6 +303,10 @@ if __name__ == '__main__':
         parser.error('--eval_expected_step must be positive')
     if opt.amp_max_retries < 0:
         parser.error('--amp_max_retries must be non-negative')
+    if opt.checkpoint_interval_steps <= 0:
+        parser.error('--checkpoint_interval_steps must be positive')
+    if opt.profile_report_steps <= 0:
+        parser.error('--profile_report_steps must be positive')
     if opt.stop_at_step is not None and not 0 < opt.stop_at_step <= opt.iters:
         parser.error('--stop_at_step must be in the range [1, --iters]')
     if len(opt.milestone_steps) != len(set(opt.milestone_steps)):
@@ -461,6 +478,12 @@ if __name__ == '__main__':
                         f'milestone steps {unaligned_milestones} are not divisible '
                         f'by {steps_per_epoch} steps/epoch; milestone checkpoints '
                         'must be saved at exactly resumable epoch boundaries'
+                    )
+                if opt.checkpoint_interval_steps % steps_per_epoch != 0:
+                    raise ValueError(
+                        f'checkpoint interval {opt.checkpoint_interval_steps} is not '
+                        f'divisible by {steps_per_epoch} steps/epoch; rolling full '
+                        'checkpoints must be epoch-aligned'
                     )
                 if trainer.global_step > target_step:
                     raise ValueError(
