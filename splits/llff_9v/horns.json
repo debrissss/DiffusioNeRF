@@ -1,0 +1,10 @@
+{
+  "dataset": "LLFF",
+  "scene": "horns",
+  "protocol": "llff_holdout8_uniform9_v1",
+  "index_basis": "zero-based transforms.json frame order",
+  "frame_count": 62,
+  "train_ids": [1, 9, 15, 23, 31, 38, 46, 53, 61],
+  "val_ids": [0],
+  "test_ids": [0, 8, 16, 24, 32, 40, 48, 56]
+}

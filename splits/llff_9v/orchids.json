@@ -1,0 +1,10 @@
+{
+  "dataset": "LLFF",
+  "scene": "orchids",
+  "protocol": "llff_holdout8_uniform9_v1",
+  "index_basis": "zero-based transforms.json frame order",
+  "frame_count": 25,
+  "train_ids": [1, 4, 6, 10, 12, 15, 18, 21, 23],
+  "val_ids": [0],
+  "test_ids": [0, 8, 16, 24]
+}

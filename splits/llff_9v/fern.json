@@ -1,0 +1,10 @@
+{
+  "dataset": "LLFF",
+  "scene": "fern",
+  "protocol": "llff_holdout8_uniform9_v1",
+  "index_basis": "zero-based transforms.json frame order",
+  "frame_count": 20,
+  "train_ids": [1, 3, 5, 7, 10, 12, 14, 17, 19],
+  "val_ids": [0],
+  "test_ids": [0, 8, 16]
+}

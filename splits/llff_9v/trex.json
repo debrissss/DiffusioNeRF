@@ -1,0 +1,10 @@
+{
+  "dataset": "LLFF",
+  "scene": "trex",
+  "protocol": "llff_holdout8_uniform9_v1",
+  "index_basis": "zero-based transforms.json frame order",
+  "frame_count": 55,
+  "train_ids": [1, 7, 14, 21, 28, 34, 41, 47, 54],
+  "val_ids": [0],
+  "test_ids": [0, 8, 16, 24, 32, 40, 48]
+}

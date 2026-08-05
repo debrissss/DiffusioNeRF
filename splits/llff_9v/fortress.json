@@ -1,0 +1,10 @@
+{
+  "dataset": "LLFF",
+  "scene": "fortress",
+  "protocol": "llff_holdout8_uniform9_v1",
+  "index_basis": "zero-based transforms.json frame order",
+  "frame_count": 42,
+  "train_ids": [1, 5, 11, 15, 21, 26, 30, 36, 41],
+  "val_ids": [0],
+  "test_ids": [0, 8, 16, 24, 32, 40]
+}
