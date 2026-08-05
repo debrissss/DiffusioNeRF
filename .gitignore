@@ -9,6 +9,7 @@
 # test_LLFF/ 保存训练日志、权重、验证图、测试图和网格。
 /test/
 /test_LLFF/
+/test_DTU/
 
 # main_nerf.py 的默认训练输出目录（--workspace workspace）
 /workspace/
@@ -31,6 +32,18 @@
 # PyTorch 模型权重
 *.pth
 *.pth.tar
+
+# 本地归档、论文原文和二进制报告资产
+*.tar
+*.docx
+/papers_2025_2026_LLFF_DTU/*.pdf
+
+# 生成的评估汇总、帧归档和报告图片
+/LLFF_8scenes_step_020001_ema/
+/report_assets/
+/all_method_metrics.csv
+/UNIFIED_LLFF_3VIEW_COMPARISON.md
+/papers_2025_2026_LLFF_DTU/LLFF_*view_comparison_summary.csv
 
 # 测试视频（Trainer.test(write_video=True)）
 *_rgb.mp4
