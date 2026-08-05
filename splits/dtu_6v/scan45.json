@@ -1,0 +1,45 @@
+{
+  "dataset": "DTU",
+  "scene": "scan45",
+  "protocol": "dtu_regnerf_standard_6v_v1",
+  "index_basis": "zero-based transforms.json frame order",
+  "frame_count": 49,
+  "train_ids": [
+    25,
+    22,
+    28,
+    40,
+    44,
+    48
+  ],
+  "val_ids": [
+    1
+  ],
+  "test_ids": [
+    1,
+    2,
+    9,
+    10,
+    11,
+    12,
+    14,
+    15,
+    23,
+    24,
+    26,
+    27,
+    29,
+    30,
+    31,
+    32,
+    33,
+    34,
+    35,
+    41,
+    42,
+    43,
+    45,
+    46,
+    47
+  ]
+}
