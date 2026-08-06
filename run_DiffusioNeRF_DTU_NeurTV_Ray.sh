@@ -135,8 +135,10 @@ fi
 
 VALID_SCAN_NUMBERS=" 8 21 30 31 34 38 40 41 45 55 63 82 103 110 114 "
 if (( $# > 0 )); then
+    ALL_SCENES_REQUESTED=0
     RAW_SCENES=("$@")
 else
+    ALL_SCENES_REQUESTED=1
     RAW_SCENES=(8 21 30 31 34 38 40 41 45 55 63 82 103 110 114)
 fi
 
@@ -162,6 +164,18 @@ for SCENE in "${SCENES[@]}"; do
     DATASET="$REPO_DIR/data/DTU_standard/$SCENE"
     SPLIT_FILE="$REPO_DIR/splits/dtu_${VIEW_COUNT}v/$SCENE.json"
     WORKSPACE="$REPO_DIR/test_DTU/test_$SCENE/few_shot${VIEW_COUNT}/test_DiffusioNeRF_NeurTV_Ray_30k_seed${SEED}"
+    COMPLETE_FILE="$WORKSPACE/evaluation/step_${TARGET_STEP_PADDED}/COMPLETE"
+
+    # In all-scenes resume mode, completed scenes are immutable inputs to the
+    # batch run. An incomplete or absent workspace is passed to main_nerf.py
+    # with --ckpt latest, which resumes ngp.pth when present and otherwise
+    # starts from scratch.
+    if [[ "$ALL_SCENES_REQUESTED" == "1" && "$CKPT_MODE" == "latest" \
+        && "$EVAL_ONLY" == "0" && -f "$COMPLETE_FILE" ]]; then
+        echo "Skipping completed DTU scene: $SCENE"
+        echo "Completed archive: $COMPLETE_FILE"
+        continue
+    fi
 
     if [[ ! -f "$DATASET/transforms.json" ]]; then
         echo "DTU transforms.json is missing: $DATASET/transforms.json" >&2
@@ -249,7 +263,6 @@ for SCENE in "${SCENES[@]}"; do
 
     CUDA_VISIBLE_DEVICES="$GPU_ID" NO_GUI=1 "${CMD[@]}"
 
-    COMPLETE_FILE="$WORKSPACE/evaluation/step_${TARGET_STEP_PADDED}/COMPLETE"
     if [[ ! -f "$COMPLETE_FILE" ]]; then
         echo "Formal evaluation archive is incomplete: $COMPLETE_FILE" >&2
         exit 1
