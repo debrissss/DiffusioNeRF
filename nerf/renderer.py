@@ -219,6 +219,13 @@ class NeRFRenderer(nn.Module):
         for k, v in density_outputs.items():
             density_outputs[k] = v.view(N, num_steps, -1)
 
+        # eval-only density floor: zero out low-density (fog) samples
+        eval_sigma_min = kwargs.get('eval_sigma_min', 0) or 0
+        if eval_sigma_min > 0 and not self.training:
+            sig = density_outputs['sigma']
+            density_outputs['sigma'] = torch.where(
+                sig < eval_sigma_min, torch.zeros_like(sig), sig)
+
         # Adv perturb on pre-rendering
         perturb_raw = adv_perturb.get('raw_c', None)
         if perturb_raw is not None:
@@ -305,7 +312,17 @@ class NeRFRenderer(nn.Module):
             density_outputs[k] = v.view(-1, v.shape[-1])
 
         mask = weights > 1e-4 # hard coded
-        rgbs = self.color(xyzs.reshape(-1, 3), dirs.reshape(-1, 3), mask=mask.reshape(-1), current_iter=current_iter, total_iter=total_iter, start_ptr=start_ptr, **density_outputs)
+        rgbs = self.color(xyzs.reshape(-1, 3), dirs.reshape(-1, 3), mask=mask.reshape(-1), current_iter=current_iter, total_iter=total_iter, start_ptr=start_ptr, cam_id=cam_id, **density_outputs)
+
+        # pose-conditioned exposure correction (before alpha compositing, so
+        # the background term is not scaled by the gain)
+        pose_app = getattr(self, 'pose_app', None)
+        pose_app_reg = None
+        if pose_app is not None:
+            cam_dir = torch.nn.functional.normalize(rays_o.reshape(-1, 3)[0], dim=-1)
+            g, b, pose_app_reg = pose_app.gated(cam_dir, self.pose_app_sigma_deg)
+            rgbs = rgbs * g.to(rgbs.dtype) + b.to(rgbs.dtype)
+
         rgbs = rgbs.view(N, -1, 3) # [N, T+t, 3]
 
         #print(xyzs.shape, 'valid_rgb:', mask.sum().item())
@@ -326,7 +343,7 @@ class NeRFRenderer(nn.Module):
             sph = raymarching.sph_from_ray(rays_o, rays_d, self.bg_radius) # [N, 2] in [-1, 1]
             bg_color = self.background(sph, rays_d.reshape(-1, 3)) # [N, 3]
         elif bg_color is None:
-            bg_color = 1
+            bg_color = getattr(self, 'default_bg', 1)
 
         # bg_color consider number=(num_rays) of rays
         image[:num_rays] = image[:num_rays] + (1 - weights_sum[:num_rays]).unsqueeze(-1) * bg_color
@@ -340,6 +357,8 @@ class NeRFRenderer(nn.Module):
         depth = depth.view(*prefix)
 
         result = {'depth': depth, 'image': image, 'weights_sum': weights_sum,}
+        if pose_app_reg is not None:
+            result['pose_app_reg'] = pose_app_reg
         if return_intermediates:
             result['weights'] = weights
             result['z_vals'] = z_vals
@@ -374,7 +393,7 @@ class NeRFRenderer(nn.Module):
             sph = raymarching.sph_from_ray(rays_o, rays_d, self.bg_radius) # [N, 2] in [-1, 1]
             bg_color = self.background(sph, rays_d) # [N, 3]
         elif bg_color is None:
-            bg_color = 1
+            bg_color = getattr(self, 'default_bg', 1)
 
         results = {}
 

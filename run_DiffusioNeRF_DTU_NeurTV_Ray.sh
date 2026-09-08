@@ -49,6 +49,12 @@ MILESTONE_STEPS_SPEC="${MILESTONE_STEPS-$DEFAULT_MILESTONES}"
 EVAL_OVERWRITE="${EVAL_OVERWRITE:-0}"
 EVAL_ONLY="${EVAL_ONLY:-0}"
 DRY_RUN="${DRY_RUN:-0}"
+SPLIT_FILE_OVERRIDE="${SPLIT_FILE_OVERRIDE:-}"
+WORKSPACE_OVERRIDE="${WORKSPACE_OVERRIDE:-}"
+BOUND="${BOUND:-2.0}"
+ANNEAL_STEPS="${ANNEAL_STEPS:-5000}"
+MASK_COMPOSITE="${MASK_COMPOSITE:-0}"
+BG_COLOR="${BG_COLOR:-black}"
 
 if [[ "$CKPT_MODE" != "latest" && "$CKPT_MODE" != "scratch" ]]; then
     echo "CKPT_MODE must be either 'latest' or 'scratch'." >&2
@@ -128,6 +134,10 @@ MODE_ARGS=()
 if [[ "$EVAL_ONLY" == "1" ]]; then
     MODE_ARGS=(--test)
 fi
+MASK_COMPOSITE_ARGS=()
+if [[ "$MASK_COMPOSITE" == "1" ]]; then
+    MASK_COMPOSITE_ARGS=(--train_mask_composite)
+fi
 PROFILE_ARGS=()
 if [[ "$PROFILE_TRAINING" == "1" ]]; then
     PROFILE_ARGS=(--profile_training --profile_report_steps "$PROFILE_REPORT_STEPS")
@@ -159,11 +169,16 @@ for RAW_SCENE in "${RAW_SCENES[@]}"; do
     SCENES+=("scan$SCAN_NUMBER")
 done
 
+if (( ${#SCENES[@]} != 1 )) && [[ -n "$SPLIT_FILE_OVERRIDE" || -n "$WORKSPACE_OVERRIDE" ]]; then
+    echo "SPLIT_FILE_OVERRIDE and WORKSPACE_OVERRIDE require exactly one scene." >&2
+    exit 2
+fi
+
 printf -v TARGET_STEP_PADDED '%06d' "$TARGET_STEP"
 for SCENE in "${SCENES[@]}"; do
     DATASET="$REPO_DIR/data/DTU_standard/$SCENE"
-    SPLIT_FILE="$REPO_DIR/splits/dtu_${VIEW_COUNT}v/$SCENE.json"
-    WORKSPACE="$REPO_DIR/test_DTU/test_$SCENE/few_shot${VIEW_COUNT}/test_DiffusioNeRF_NeurTV_Ray_30k_seed${SEED}"
+    SPLIT_FILE="${SPLIT_FILE_OVERRIDE:-$REPO_DIR/splits/dtu_${VIEW_COUNT}v/$SCENE.json}"
+    WORKSPACE="${WORKSPACE_OVERRIDE:-$REPO_DIR/test_DTU/test_$SCENE/few_shot${VIEW_COUNT}/test_DiffusioNeRF_NeurTV_Ray_30k_seed${SEED}}"
     COMPLETE_FILE="$WORKSPACE/evaluation/step_${TARGET_STEP_PADDED}/COMPLETE"
 
     # In all-scenes resume mode, completed scenes are immutable inputs to the
@@ -213,13 +228,13 @@ for SCENE in "${SCENES[@]}"; do
         --amp_max_retries 4
         --lr 0.01
         --num_rays 4096
-        --num_steps 64
-        --upsample_steps 128
+        --num_steps 96
+        --upsample_steps 192
         --downscale 1
         --scale 0.33
-        --bound 2.0
+        --bound "$BOUND"
         --dataset_name "$SCENE ${VIEW_COUNT}-views"
-        --implementation_name "DiffusioNeRF+NeurTV+Ray"
+        --implementation_name "DiffusioNeRF-Milestone1"
         --diff_reg
         --loss_dist
         --loss_fg
@@ -229,23 +244,16 @@ for SCENE in "${SCENES[@]}"; do
         --fg_lambda 1e-4
         --patch_size 4
         --depth_reg_lambda 0.1
-        --use_nll_color
-        --use_nll_sigma
-        --fre_nll_color
-        --total_iter_end_rate 0.9
-        --smoothing
-        --smoothing_lambda 1e-5
-        --smooth_sampling_method near_pixel
-        --virtual_ray
-        --virtual_ray_start_iter 1000
-        --virtual_ray_k 10
-        --virtual_ray_jsd_th 0.02
-        --virtual_ray_depth_lambda 0.1
-        --neurtv
-        --neurtv_start_iter 3000
-        --neurtv_lambda 1e-7
-        --neurtv_num_samples 4096
-        --neurtv_fd_epsilon 0.01
+        --anneal_nearfar
+        --anneal_nearfar_steps "$ANNEAL_STEPS"
+        --ema_decay 0.95
+        --eval_num_steps 128
+        --eval_upsample_steps 256
+        --anneal_nearfar_perc 0.2
+        --anneal_mid_perc 0.5
+        --no_virtual_ray
+        --bg_color "$BG_COLOR"
+        "${MASK_COMPOSITE_ARGS[@]}"
     )
 
     echo "Starting standard DTU ${VIEW_COUNT}-view NeurTV + virtual-ray experiment: $SCENE"

@@ -8,6 +8,54 @@ from activation import trunc_exp
 from .renderer import NeRFRenderer
 
 
+class PoseAppearanceMLP(torch.nn.Module):
+    # Exposure correction as a smooth function of camera direction.
+    # Outputs per-channel log-gain (exp) and additive bias. Final layer is
+    # zero-initialized so training starts as a no-op. A buffer of training
+    # camera directions enables a distance gate that blends the correction
+    # back to identity far from any training pose.
+
+    def __init__(self, freq=2, hidden=32, device='cuda'):
+        super().__init__()
+        self.freq = freq
+        in_dim = 3 * (1 + 2 * freq)
+        self.net = torch.nn.Sequential(
+            torch.nn.Linear(in_dim, hidden, device=device),
+            torch.nn.ReLU(inplace=True),
+            torch.nn.Linear(hidden, hidden, device=device),
+            torch.nn.ReLU(inplace=True),
+            torch.nn.Linear(hidden, 6, device=device),
+        )
+        torch.nn.init.zeros_(self.net[-1].weight)
+        torch.nn.init.zeros_(self.net[-1].bias)
+        self.register_buffer('train_dirs', torch.zeros(0, 3))
+
+    def fourier(self, d):
+        out = [d]
+        for k in range(self.freq):
+            out.append(torch.sin((2 ** k) * np.pi * d))
+            out.append(torch.cos((2 ** k) * np.pi * d))
+        return torch.cat(out, dim=-1)
+
+    def forward(self, d):
+        out = self.net(self.fourier(d.unsqueeze(0)))[0]
+        log_gain, bias = out[:3], out[3:]
+        reg = (out ** 2).mean()
+        return torch.exp(log_gain), bias, reg
+
+    def gated(self, d, sigma_deg):
+        gain, bias, reg = self.forward(d)
+        w = torch.ones((), device=d.device)
+        if self.train_dirs.shape[0] > 0:
+            dots = (self.train_dirs @ d).clamp(-1, 1)
+            dist = torch.acos(dots).min()
+            sigma = torch.tensor(sigma_deg * np.pi / 180.0, device=d.device)
+            w = torch.exp(-dist ** 2 / (2 * sigma ** 2))
+        g_eff = w * gain + (1 - w)
+        b_eff = w * bias
+        return g_eff, b_eff, reg
+
+
 class NeRFNetwork(NeRFRenderer):
     def __init__(self,
                  encoding="hashgrid",
@@ -23,6 +71,7 @@ class NeRFNetwork(NeRFRenderer):
                  bound=1,
                  device="cpu",
                  num_levels=16,
+                 log2_hashmap_size=19,
                  nll_color=False,
                  nll_sigma=False,
                  fre_nll_color=False,
@@ -40,7 +89,7 @@ class NeRFNetwork(NeRFRenderer):
         self.num_layers = num_layers
         self.hidden_dim = hidden_dim
         self.geo_feat_dim = geo_feat_dim
-        self.encoder, self.in_dim = get_encoder(encoding, desired_resolution=2048 * bound, device=device, num_levels=num_levels)
+        self.encoder, self.in_dim = get_encoder(encoding, desired_resolution=2048 * bound, device=device, num_levels=num_levels, log2_hashmap_size=log2_hashmap_size)
 
         enc_net = [nn.Linear(self.in_dim, self.in_dim, bias=False, device=device)]
         self.enc_net = nn.ModuleList(enc_net)
@@ -91,27 +140,46 @@ class NeRFNetwork(NeRFRenderer):
 
         # background network
         if self.bg_radius > 0:
-            self.num_layers_bg = num_layers_bg        
+            self.num_layers_bg = num_layers_bg
             self.hidden_dim_bg = hidden_dim_bg
-            self.encoder_bg, self.in_dim_bg = get_encoder(encoding_bg, input_dim=2, num_levels=4, log2_hashmap_size=19, desired_resolution=2048) # much smaller hashgrid 
-            
+            self.encoder_bg, self.in_dim_bg = get_encoder(encoding_bg, input_dim=2, num_levels=4, log2_hashmap_size=19, desired_resolution=2048) # much smaller hashgrid
+
             bg_net = []
             for l in range(num_layers_bg):
                 if l == 0:
                     in_dim = self.in_dim_bg + self.in_dim_dir
                 else:
                     in_dim = hidden_dim_bg
-                
+
                 if l == num_layers_bg - 1:
                     out_dim = 3 # 3 rgb
                 else:
                     out_dim = hidden_dim_bg
-                
+
                 bg_net.append(nn.Linear(in_dim, out_dim, bias=False, device=device))
 
             self.bg_net = nn.ModuleList(bg_net)
         else:
             self.bg_net = None
+
+        # per-training-image appearance embedding (log gain + rgb bias),
+        # only applied when a cam_id is provided (training rays).
+        self.appearance = None
+        # pose-conditioned appearance MLP: continuous exposure correction as a
+        # function of the camera-center direction; applies at train AND test.
+        self.pose_app = None
+        self.pose_app_sigma_deg = 60.0
+
+    def init_appearance(self, num_images):
+        if num_images and num_images > 0 and self.appearance is None:
+            self.appearance = torch.nn.Parameter(torch.zeros(num_images, 6))
+
+    def init_pose_app(self, train_dirs, sigma_deg=60.0, freq=2, device='cuda'):
+        if self.pose_app is None:
+            self.pose_app = PoseAppearanceMLP(freq=freq, device=device)
+            dirs = torch.nn.functional.normalize(train_dirs, dim=-1).to(device)
+            self.pose_app.train_dirs = dirs
+            self.pose_app_sigma_deg = float(sigma_deg)
 
 
     def forward(self, x, d):
@@ -209,7 +277,7 @@ class NeRFNetwork(NeRFRenderer):
         return rgbs
 
     # allow masked inference
-    def color(self, x, d, mask=None, geo_feat=None, current_iter=None, total_iter=None, start_ptr=1, **kwargs):
+    def color(self, x, d, mask=None, geo_feat=None, current_iter=None, total_iter=None, start_ptr=1, cam_id=None, **kwargs):
         # x: [N, 3] in [-bound, bound]
         # mask: [N,], bool, indicates where we actually needs to compute rgb.
 
@@ -221,6 +289,10 @@ class NeRFNetwork(NeRFRenderer):
             x = x[mask]
             d = d[mask]
             geo_feat = geo_feat[mask]
+        cam = None
+        if cam_id is not None and self.appearance is not None:
+            cam = cam_id.reshape(-1).long()
+            cam = cam[mask] if mask is not None else cam
 
         d = self.encoder_dir(d)
         if self.fre_nll_color and current_iter is not None and total_iter is not None:
@@ -245,6 +317,17 @@ class NeRFNetwork(NeRFRenderer):
         # sigmoid activation for rgb
         h = torch.sigmoid(h)
 
+        # per-training-image exposure correction (only when cam_id given)
+        if cam is not None:
+            if h.shape[0] == cam.shape[0] and cam.max().item() < self.appearance.shape[0]:
+                aff = self.appearance[cam] # [N, 6]
+                log_gain, bias = aff[:, :3], aff[:, 3:6]
+                corrected = h * torch.exp(log_gain).to(h.dtype) + bias.to(h.dtype)
+                if mask is not None:
+                    h = corrected.to(h.dtype)
+                else:
+                    h = corrected.clamp(0, 1)
+
         if mask is not None:
             rgbs[mask] = h.to(rgbs.dtype) # fp16 --> fp32
         else:
@@ -264,6 +347,8 @@ class NeRFNetwork(NeRFRenderer):
         if self.bg_radius > 0:
             params.append({'params': self.encoder_bg.parameters(), 'lr': lr})
             params.append({'params': self.bg_net.parameters(), 'lr': lr})
+        if self.appearance is not None:
+            params.append({'params': [self.appearance], 'lr': lr})
         
         return params
 

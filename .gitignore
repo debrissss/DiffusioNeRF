@@ -26,8 +26,9 @@
 # table.py 生成的实验指标表
 /tables/
 
-# 本地论文文档
-/稀疏视点下神经辐射场重建的优化方法_提纯版.pdf
+# 本地论文和压缩包
+*.pdf
+*.zip
 
 # PyTorch 模型权重
 *.pth
@@ -42,8 +43,11 @@
 /LLFF_8scenes_step_020001_ema/
 /report_assets/
 /all_method_metrics.csv
-/UNIFIED_LLFF_3VIEW_COMPARISON.md
 /papers_2025_2026_LLFF_DTU/LLFF_*view_comparison_summary.csv
+/dtu_3view_dngaussian_protocol_all_checkpoints_summary.json
+/dtu_3view_masked_all_checkpoints_summary.json
+/scan114_old10k_vs_new_step10002_raw_comparison/pairs/
+/scan114_old_high_vs_new_low_comparison/pairs/
 
 # 测试视频（Trainer.test(write_video=True)）
 *_rgb.mp4

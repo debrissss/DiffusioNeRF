@@ -1,0 +1,49 @@
+{
+  "schema_version": 1,
+  "dataset_root": "data/DTU/scan114",
+  "scene": "scan114",
+  "protocol": "dtu_reconstructed_project_legacy_3v_43test_v1",
+  "files": {
+    "transforms.json": "25a62afb9e59c65ef9a47168e88b3c85f9e0f51679dafc5acf70e40a0bb71fa8",
+    "poses_bounds.npy": "b1b3ab91de1442e76d0ffadf43fdf9bb612d3b507b6651ea375cd12a2ba17020",
+    "cameras.npz": "c7f39fa796cad69c1db788d91c5ee4f653420eacac9b1eff101abac689d52153"
+  },
+  "images": {
+    "directory": "4/images",
+    "count": 49,
+    "width": 400,
+    "height": 300,
+    "tree_sha256": "359c94c101e22467aa6436b0d6f35ce5b65d5fda0c7a7953c17887687a999d7d",
+    "tree_hash_algorithm": "SHA256 over each sorted basename, one NUL byte, and the complete file bytes"
+  },
+  "camera": {
+    "frame_count": 49,
+    "width": 400,
+    "height": 300,
+    "fl_x": 714.2873481672256,
+    "fl_y": 714.2873481672256,
+    "cx": 200.0,
+    "cy": 150.0,
+    "mean_source_camera_radius": 4.0,
+    "source_pose_f64le_sha256": "1782b40c0c0d683f9fc3f8dcd5ac374606e81b7dbf0e001f8f63c80ab57c0cbe"
+  },
+  "runtime": {
+    "downscale": 1,
+    "scale": 0.33,
+    "offset": [0.0, 0.0, 0.0],
+    "bound": 2.0,
+    "runtime_pose_f32le_sha256": "d630fec5ce6316facfea455e055f03b4863ae2297e630edd6e1caafd41b7df85",
+    "ray_sample_f32le_sha256": "749a3dfb948b3d069823e89e80fd21650d9dc4150ed3943d2202d272dd743f1c",
+    "ray_sample_pixels": [[0, 0], [399, 0], [0, 299], [399, 299], [199, 149]],
+    "ray_sample_layout": "For each frame and pixel: float32 ray origin xyz followed by normalized ray direction xyz"
+  },
+  "split": {
+    "train_ids": [1, 23, 47],
+    "val_ids": [3, 4, 5],
+    "test_ids": [
+      0, 2, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20,
+      21, 22, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37,
+      38, 39, 40, 41, 42, 43, 44, 45, 46, 48
+    ]
+  }
+}

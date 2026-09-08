@@ -124,6 +124,7 @@ def get_rays(poses, intrinsics, H, W, N=-1, error_map=None, patch_size=1, ray_in
     if ray_inds is not None and N > 0:
         i = torch.gather(i, -1, ray_inds)
         j = torch.gather(j, -1, ray_inds)
+        results['inds'] = ray_inds
     elif N > 0:
         N = min(N, H*W)
 
@@ -365,6 +366,8 @@ class LPIPSMeter:
 
 class Trainer(object):
     _RESUME_CONFIG_IGNORED_KEYS = {
+        'bg_mode',
+        'eval_bg_color',
         'ckpt',
         'checkpoint_interval_steps',
         'dataset_name',
@@ -1029,7 +1032,8 @@ class Trainer(object):
             images[..., :3] = srgb_to_linear(images[..., :3])
 
         if C == 3 or self.model.bg_radius > 0:
-            bg_color = 1
+            eval_bg = getattr(self.opt, 'eval_bg_color', None) or getattr(self.opt, 'bg_mode', 'white')
+            bg_color = {'black': 0, 'gray': 0.5}.get(eval_bg, 1)
         # train with random background color if not using a bg model and has alpha channel.
         else:
             #bg_color = torch.ones(3, device=self.device) # [3], fixed white background
@@ -1189,9 +1193,13 @@ class Trainer(object):
         if self.opt.patch_size > 1:
             ps = self.opt.patch_size
             reshape_to_patch = lambda x, dim: x.reshape(-1, ps, ps, dim)
-            depth = reshape_to_patch(outputs_clean['depth'], 1)
+            # only the first num_rays rays carry patch structure; entropy /
+            # smoothing rays appended by the collate function have none.
+            depth = reshape_to_patch(
+                outputs_clean['depth'].reshape(-1)[:self.opt.num_rays], 1)
 
-            weighting = reshape_to_patch(outputs_clean['weights_sum'], 1)[:, :-1, :-1]
+            weighting = reshape_to_patch(
+                outputs_clean['weights_sum'].reshape(-1)[:self.opt.num_rays], 1)[:, :-1, :-1]
             if self.opt.rgb_weighting:
                 num_rays_patches = self.opt.num_rays // (ps ** 2)
                 weighting_rgb = reshape_to_patch(torch.exp(-torch.abs(pred_rgb_clean-gt_rgb)/self.opt.patch_gamma).mean(-1), 1)[:, :-1, :-1]
@@ -1230,6 +1238,9 @@ class Trainer(object):
             self.error_map[index] = error_map
 
         loss = loss.mean()
+
+        if getattr(self.opt, 'pose_app_reg', 0) > 0 and 'pose_app_reg' in outputs_clean:
+            loss = loss + self.opt.pose_app_reg * outputs_clean['pose_app_reg']
 
 
         # --- NeurTV regularization on density field ---
@@ -1272,8 +1283,20 @@ class Trainer(object):
             #loss_fg
             if self.opt.loss_fg:
                 weights_sum = outputs_clean['weights_sum'][:self.opt.num_rays]
-                loss_fg = (1 - weights_sum)**2
-                loss_fg = loss_fg.mean()
+                if images.shape[-1] == 4:
+                    # alpha-channel data: push alpha->1 only inside the object
+                    # mask, and suppress alpha on background rays (DNGaussian-style)
+                    alpha_gt = images[0, :self.opt.num_rays, 3].detach()
+                    fg_mask = (alpha_gt > 0.5).float()
+                    n_fg = fg_mask.sum().clamp(min=1)
+                    n_bg = (1 - fg_mask).sum().clamp(min=1)
+                    loss_fg = (
+                        ((1 - weights_sum)**2 * fg_mask).sum() / n_fg
+                        + (weights_sum**2 * (1 - fg_mask)).sum() / n_bg
+                    )
+                else:
+                    loss_fg = (1 - weights_sum)**2
+                    loss_fg = loss_fg.mean()
                 loss = loss + loss_fg * self.opt.fg_lambda
 
 
@@ -1391,13 +1414,19 @@ class Trainer(object):
             images[..., :3] = srgb_to_linear(images[..., :3])
 
         # eval with fixed background color
-        bg_color = 1
+        eval_bg = getattr(self.opt, 'eval_bg_color', None) or getattr(self.opt, 'bg_mode', 'white')
+        bg_color = {'black': 0, 'gray': 0.5}.get(eval_bg, 1)
         if C == 4:
             gt_rgb = images[..., :3] * images[..., 3:] + bg_color * (1 - images[..., 3:])
         else:
             gt_rgb = images
         
-        outputs = self.model.render(rays_o, rays_d, staged=True, bg_color=bg_color, perturb=False, **vars(self.opt))
+        render_kwargs = dict(vars(self.opt))
+        if getattr(self.opt, 'eval_num_steps', None):
+            render_kwargs['num_steps'] = self.opt.eval_num_steps
+        if getattr(self.opt, 'eval_upsample_steps', None):
+            render_kwargs['upsample_steps'] = self.opt.eval_upsample_steps
+        outputs = self.model.render(rays_o, rays_d, staged=True, bg_color=bg_color, perturb=False, **render_kwargs)
 
         pred_rgb = outputs['image'].reshape(B, H, W, 3)
         pred_depth = outputs['depth'].reshape(B, H, W)

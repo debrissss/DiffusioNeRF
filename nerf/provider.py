@@ -12,7 +12,7 @@ import trimesh
 import torch
 from torch.utils.data import DataLoader
 
-from .utils import get_rays
+from .utils import get_rays, custom_meshgrid
 from nerf.info.generate_near_c2w import GetNearC2W, get_near_pixel
 
 
@@ -402,6 +402,36 @@ class NeRFDataset:
             self.poses = [self.poses[i] for i in idx_sub]
             self.frame_ids = [self.frame_ids[i] for i in idx_sub]
 
+        # RegNeRF/DNGaussian-style DTU protocol: composite training images onto
+        # a white background outside a dilated object mask, so the
+        # multi-view inconsistent far backdrop is excluded from supervision.
+        # Eval-side masks are handled by the masked metrics evaluator.
+        if (
+            self.type == 'train'
+            and getattr(self.opt, 'train_mask_composite', False)
+            and self.images is not None
+        ):
+            mask_dir = os.path.join(self.root_path, 'masks_train_approx')
+            if not os.path.isdir(mask_dir):
+                raise FileNotFoundError(
+                    f'[NeRFDataset] --train_mask_composite requires masks under {mask_dir}'
+                )
+            new_images = []
+            for image, fid in zip(self.images, self.frame_ids):
+                mp = os.path.join(mask_dir, f'{fid:06d}.png')
+                mask = cv2.imread(mp, cv2.IMREAD_GRAYSCALE)
+                if mask is None:
+                    raise FileNotFoundError(f'[NeRFDataset] missing train mask: {mp}')
+                mask = cv2.resize(
+                    mask, (image.shape[1], image.shape[0]),
+                    interpolation=cv2.INTER_NEAREST,
+                )
+                keep = (mask > 127).astype(np.float32)[..., None]
+                image = image * keep + (1.0 - keep)
+                new_images.append(image)
+            self.images = new_images
+            print(f'[INFO] train images composited onto white background using {mask_dir}')
+
             
         self.poses = torch.from_numpy(np.stack(self.poses, axis=0)) # [N, 4, 4]
         if self.images is not None:
@@ -416,6 +446,46 @@ class NeRFDataset:
             self.error_map = torch.ones([self.images.shape[0], 128 * 128], dtype=torch.float) # [B, 128 * 128], flattened for easy indexing, fixed resolution...
         else:
             self.error_map = None
+
+        # lit-region ray sampling: on black-background captures (e.g. DTU),
+        # restrict training rays to pixels that actually carry signal and keep
+        # only a small share of full-image (near-black) rays to keep free
+        # space suppressed.
+        self.lit_sampling = (
+            self.type == 'train'
+            and getattr(self.opt, 'lit_ray_sampling', False)
+            and self.images is not None
+        )
+        if self.lit_sampling:
+            if self.opt.error_map:
+                raise ValueError(
+                    '[NeRFDataset] --lit_ray_sampling does not support --error_map'
+                )
+            ps = max(int(self.opt.patch_size), 1)
+            lit_thresh = float(getattr(self.opt, 'lit_thresh', 0.08))
+            self._lit_corners = []
+            for image in self.images:
+                lit = (image[..., :3].max(dim=-1).values > lit_thresh)
+                mask = lit.numpy().astype(np.uint8)
+                if ps > 1:
+                    kernel = np.ones((ps, ps), dtype=np.uint8)
+                    mask = cv2.erode(mask, kernel, iterations=1)
+                    valid = mask[:self.H - ps + 1, :self.W - ps + 1] > 0
+                else:
+                    valid = mask > 0
+                rows, cols = np.nonzero(valid)
+                corners = torch.from_numpy(np.stack([rows, cols])).long()
+                if corners.shape[1] == 0:
+                    raise ValueError(
+                        '[NeRFDataset] lit mask is empty for one frame; '
+                        'lower --lit_thresh'
+                    )
+                self._lit_corners.append(corners)
+            lit_ratio = float(np.mean([
+                c.shape[1] / ((self.H - ps + 1) * (self.W - ps + 1))
+                for c in self._lit_corners
+            ]))
+            print(f'[INFO] lit ray sampling enabled; mean lit corner ratio = {lit_ratio:.3f}')
 
         # [debug] uncomment to view all training poses.
         # visualize_poses(self.poses.numpy())
@@ -481,6 +551,9 @@ class NeRFDataset:
 
         if self.type == 'test':
             rays = get_rays(poses, self.intrinsics, self.H, self.W, -1)
+        elif self.lit_sampling:
+            inds = self._sample_lit_inds(index[0], self.num_rays)
+            rays = get_rays(poses, self.intrinsics, self.H, self.W, self.num_rays, ray_inds=inds)
         else:
             rays = get_rays(poses, self.intrinsics, self.H, self.W, self.num_rays, error_map, self.opt.patch_size)
 
@@ -527,7 +600,7 @@ class NeRFDataset:
                         near_rays = get_rays(near_pose, self.intrinsics, self.H, self.W, self.num_rays, patch_size=self.opt.patch_size, ray_inds=rays['inds'])
 
             if self.opt.entropy and (self.opt.N_entropy != 0):
-                rays_entropy = get_rays(poses, self.intrinsics, self.H, self.W, self.opt.N_entropy, patch_size=self.opt.patch_size)
+                rays_entropy = get_rays(poses, self.intrinsics, self.H, self.W, self.opt.N_entropy, patch_size=1)
                 if self.opt.smoothing:
                     for pose in poses:
                         if self.opt.smooth_sampling_method == 'near_pixel':
@@ -555,6 +628,34 @@ class NeRFDataset:
                     results['rays_d'] = torch.cat([results['rays_d'], near_rays['rays_d']], 1)
 
         return results
+
+    def _sample_lit_inds(self, frame_idx, num_rays):
+        '''Sample flattened pixel indices for training rays: patches taken
+        from the frame's lit region, plus a share of full-image patches.'''
+        ps = max(int(self.opt.patch_size), 1)
+        num_patch = num_rays // (ps * ps)
+        corners = self._lit_corners[frame_idx]
+        bg_ratio = float(getattr(self.opt, 'lit_bg_ratio', 0.1))
+        n_lit = min(num_patch, int(round(num_patch * (1.0 - bg_ratio))))
+        n_bg = num_patch - n_lit
+        picks = []
+        if n_lit > 0:
+            sel = torch.randint(0, corners.shape[1], size=[n_lit])
+            picks.append(corners[:, sel].clone())
+        if n_bg > 0:
+            xs = torch.randint(0, self.H - ps + 1, size=[n_bg])
+            ys = torch.randint(0, self.W - ps + 1, size=[n_bg])
+            picks.append(torch.stack([xs, ys], dim=0))
+        corners_xy = torch.cat(picks, dim=1) # [2, num_patch]
+
+        pi, pj = custom_meshgrid(
+            torch.arange(ps), torch.arange(ps)
+        )
+        offsets = torch.stack([pi.reshape(-1), pj.reshape(-1)], dim=-1) # [p^2, 2]
+        inds = corners_xy.t().unsqueeze(1) + offsets.unsqueeze(0) # [np, p^2, 2]
+        inds = inds.reshape(-1, 2)
+        inds = inds[:, 0] * self.W + inds[:, 1] # [N]
+        return inds[None, ...].to(self.device) # [1, N]
 
     def dataloader(self):
         size = len(self.poses)

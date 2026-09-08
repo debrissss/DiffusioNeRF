@@ -113,6 +113,47 @@ if __name__ == '__main__':
     parser.add_argument('--patch_size', type=int, default=1, help="[experimental] render patches in training, so as to apply LPIPS loss. 1 means disabled, use [64, 32, 16] to enable")
     parser.add_argument('--few_shot', type=int, default=0, help="how many images to train (for few-shot setting)")
 
+    ### Lit-region ray sampling (black-background few-shot scenes such as DTU)
+    parser.add_argument('--lit_ray_sampling', action='store_true',
+                        help='sample training rays from lit pixels only, keeping a small share of full-image rays')
+    parser.add_argument('--lit_thresh', type=float, default=0.08,
+                        help='pixel max-channel value above which a pixel counts as lit (in [0, 1])')
+    parser.add_argument('--lit_bg_ratio', type=float, default=0.1,
+                        help='fraction of training patches sampled from the full image instead of the lit region')
+
+    ### Per-training-image appearance embedding (DTU-style exposure variation)
+    parser.add_argument('--appearance_embedding', action='store_true',
+                        help='learn a per-training-image exposure affine; identity at test time')
+    parser.add_argument('--bg_color', type=str, default='white', choices=['white', 'black', 'gray'],
+                        dest='bg_mode',
+                        help='background color composited behind the scene for training and evaluation renders')
+    parser.add_argument('--black_bg', dest='bg_mode', action='store_const', const='black',
+                        help='shorthand for --bg_color black (for DTU-style black-background data)')
+    parser.add_argument('--ema_decay', type=float, default=0.95,
+                        help='EMA decay coefficient for the shadow weights')
+    parser.add_argument('--pose_appearance', action='store_true',
+                        help='pose-conditioned exposure correction MLP (train and eval)')
+    parser.add_argument('--pose_app_sigma_deg', type=float, default=60.0,
+                        help='gating width (degrees) blending the correction to identity far from training poses')
+    parser.add_argument('--pose_app_reg', type=float, default=1e-3,
+                        help='L2 regularization on the pose-appearance MLP outputs')
+    parser.add_argument('--pose_app_freq', type=int, default=2,
+                        help='Fourier frequencies for the camera-direction encoding')
+    parser.add_argument('--log2_hashmap_size', type=int, default=19,
+                        help='log2 size of the hash grid table')
+    parser.add_argument('--hidden_dim_color', type=int, default=64,
+                        help='hidden width of the color MLP')
+    parser.add_argument('--eval_num_steps', type=int, default=None,
+                        help='override num_steps during evaluation only (finer integration)')
+    parser.add_argument('--eval_upsample_steps', type=int, default=None,
+                        help='override upsample_steps during evaluation only')
+    parser.add_argument('--eval_sigma_min', type=float, default=0.0,
+                        help='eval-only density floor: sigma below this is zeroed (fog suppression)')
+    parser.add_argument('--eval_bg_color', type=str, default=None, choices=['white', 'gray', 'black'],
+                        help='eval-only background color; default follows --bg_color. Use gray (0.5) to match the expected leak of random-background alpha training')
+    parser.add_argument('--train_mask_composite', action='store_true',
+                        help='composite training images onto white background outside dilated object masks (RegNeRF/DNGaussian DTU protocol)')
+
     ### Depth Smoothness regularization with patch_size=True
     parser.add_argument('--rgb_weighting', action='store_true', help="use color difference b/w gt and prediction as geometric loss weighting factor")
     parser.add_argument('--patch_gamma', type=int, default=1, help="gamma for geometric loss weighting factor")
@@ -352,7 +393,7 @@ if __name__ == '__main__':
         from nerf.network import NeRFNetwork
 
     print(opt)
-    
+
     seed_everything(opt.seed)
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -372,7 +413,10 @@ if __name__ == '__main__':
         fre_nll_color=opt.fre_nll_color,
         fre_nll_sigma=opt.fre_nll_sigma,
         aabb_box=opt.aabb_box,
+        log2_hashmap_size=opt.log2_hashmap_size,
+        hidden_dim_color=opt.hidden_dim_color,
     )
+    model.default_bg = {'black': 0.0, 'gray': 0.5}.get(opt.bg_mode, 1.0)
     
     #print(model)
     awp_adversary = None
@@ -387,6 +431,20 @@ if __name__ == '__main__':
 
 
     if opt.test:
+        if opt.appearance_embedding or opt.pose_appearance:
+            _ckpt_guess = os.path.join(opt.workspace, 'checkpoints', 'ngp.pth')
+            if not os.path.exists(_ckpt_guess) and opt.ckpt not in (None, 'latest', 'scratch'):
+                _ckpt_guess = opt.ckpt
+            if os.path.exists(_ckpt_guess):
+                _sd = torch.load(_ckpt_guess, map_location='cpu')
+                _sd = _sd.get('model', _sd)
+                if 'appearance' in _sd:
+                    model.init_appearance(_sd['appearance'].shape[0])
+                    print(f'[INFO] appearance embedding restored size {_sd["appearance"].shape[0]}')
+                if opt.pose_appearance and 'pose_app.net.0.weight' in _sd:
+                    n_dirs = _sd['pose_app.train_dirs'].shape[0]
+                    model.init_pose_app(torch.zeros(n_dirs, 3), sigma_deg=opt.pose_app_sigma_deg, freq=opt.pose_app_freq, device=device)
+                    print(f'[INFO] pose appearance restored with {n_dirs} train dirs')
         trainer = Trainer(
             'ngp',
             opt,
@@ -394,7 +452,7 @@ if __name__ == '__main__':
             device=device,
             workspace=opt.workspace,
             criterion=criterion,
-            ema_decay=0.95,
+            ema_decay=opt.ema_decay,
             fp16=opt.fp16,
             metrics=[],
             use_checkpoint=opt.ckpt,
@@ -430,11 +488,18 @@ if __name__ == '__main__':
 
         train_loader = NeRFDataset(opt, device=device, type='train', downscale=opt.downscale).dataloader()
 
+        if opt.appearance_embedding:
+            model.init_appearance(len(train_loader._data.poses))
+            print(f'[INFO] appearance embedding enabled for {len(train_loader._data.poses)} training images')
+        if opt.pose_appearance:
+            model.init_pose_app(train_loader._data.poses[:, :3, 3], sigma_deg=opt.pose_app_sigma_deg, freq=opt.pose_app_freq, device=device)
+            print(f'[INFO] pose-conditioned appearance enabled for {len(train_loader._data.poses)} training poses (sigma={opt.pose_app_sigma_deg}deg)')
+
         # decay to 0.1 * init_lr at last iter step
         scheduler = lambda optimizer: optim.lr_scheduler.LambdaLR(optimizer, lambda iter: 0.1 ** min(iter / opt.iters, 1))
 
         metrics = [PSNRMeter(), LPIPSMeter(device=device), SSIMMeter(device=device)]
-        trainer = Trainer('ngp', opt, model, device=device, workspace=opt.workspace, optimizer=optimizer, criterion=criterion, ema_decay=0.95, fp16=opt.fp16, lr_scheduler=scheduler, scheduler_update_every_step=True, metrics=metrics, use_checkpoint=opt.ckpt, eval_interval=50, awp_adversary=awp_adversary)
+        trainer = Trainer('ngp', opt, model, device=device, workspace=opt.workspace, optimizer=optimizer, criterion=criterion, ema_decay=opt.ema_decay, fp16=opt.fp16, lr_scheduler=scheduler, scheduler_update_every_step=True, metrics=metrics, use_checkpoint=opt.ckpt, eval_interval=50, awp_adversary=awp_adversary)
 
         # GUI: 若请求 GUI 且可用则打开；否则直接训练
         if opt.gui and GUI_AVAILABLE:
