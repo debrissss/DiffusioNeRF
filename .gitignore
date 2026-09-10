@@ -42,6 +42,7 @@
 # 生成的评估汇总、帧归档和报告图片
 /LLFF_8scenes_step_020001_ema/
 /report_assets/
+/comparison_figures/
 /all_method_metrics.csv
 /papers_2025_2026_LLFF_DTU/LLFF_*view_comparison_summary.csv
 /dtu_3view_dngaussian_protocol_all_checkpoints_summary.json

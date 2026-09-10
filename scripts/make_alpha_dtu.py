@@ -44,6 +44,8 @@ def main():
                         help='mask directory relative to src')
     parser.add_argument('--output-dir', type=str, default=None,
                         help='write only RGBA images to this directory relative to src')
+    parser.add_argument('--size', type=int, nargs=2, metavar=('WIDTH', 'HEIGHT'),
+                        help='resize RGB images and masks before composing RGBA')
     args = parser.parse_args()
 
     src = os.path.abspath(args.src)
@@ -58,10 +60,13 @@ def main():
         n_img = 0
         for p in sorted(glob.glob(os.path.join(image_dir, '*.png'))):
             fid = os.path.basename(p)
-            frame_id = int(os.path.splitext(fid)[0])
-            mask_p = os.path.join(mask_dir, f'{frame_id:03d}.png')
+            mask_p = os.path.join(mask_dir, fid)
             img = cv2.imread(p, cv2.IMREAD_COLOR)
             mask = cv2.imread(mask_p, cv2.IMREAD_GRAYSCALE)
+            if args.size is not None:
+                size = tuple(args.size)
+                img = cv2.resize(img, size, interpolation=cv2.INTER_AREA)
+                mask = cv2.resize(mask, size, interpolation=cv2.INTER_NEAREST)
             rgba = cv2.cvtColor(img, cv2.COLOR_BGR2BGRA)
             rgba[:, :, 3] = mask
             cv2.imwrite(os.path.join(output_dir, fid), rgba)
